@@ -17,11 +17,12 @@ from core.commit.service import CommitService
 from core.indexing.trajectory_vector_indexer import TrajectoryVectorIndexer
 from core.commit.summary_llm import LLMTrajectorySummarizer
 from core.retrieve.semantic_recall import SemanticRecall
+from core.retrieve.skill_retriever import SkillRetriever
 from core.retrieve.service import RetrieveService
 from infra.audit.audit_logger import JsonlAuditLogger
 from infra.storage.fs.trajectory_repo import LocalFSTrajectoryRepository
 from infra.storage.graph.factory import build_graph_store_writer
-from infra.storage.vector.factory import build_vector_store_adapter
+from infra.storage.vector.factory import build_skill_vector_store_adapter, build_vector_store_adapter
 
 
 def create_app(settings: AppSettings | None = None) -> FastAPI:
@@ -33,6 +34,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     audit = JsonlAuditLogger(file_path=cfg.storage.audit_file_path)
     graph_store = build_graph_store_writer(cfg)
     vector_store = build_vector_store_adapter(cfg)
+    skill_vector_store = build_skill_vector_store_adapter(cfg)
     vector_indexer = None
     if cfg.indexing_async_enabled and cfg.embedding_provider.lower() == "openai" and cfg.openai_api_key:
         if vector_store is not None and cfg.indexing_include_levels:
@@ -90,11 +92,28 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             embedder_base_url=cfg.model_endpoints.embedder_base_url or None,
             embedding_mode=cfg.embedding_mode,
         )
+    skill_retriever = None
+    if (
+        cfg.retrieve_skills_enabled
+        and skill_vector_store is not None
+        and cfg.openai_api_key
+        and cfg.embedding_provider.lower() == "openai"
+    ):
+        skill_retriever = SkillRetriever(
+            vector_store=skill_vector_store,
+            embedding_model=cfg.embedding_model,
+            api_key=cfg.openai_api_key,
+            embedder_base_url=cfg.model_endpoints.embedder_base_url or None,
+            embedding_mode=cfg.embedding_mode,
+        )
     clean_graph_loader = None
     if graph_store is not None and hasattr(graph_store, "load_clean_graph"):
         clean_graph_loader = lambda trajectory_id: graph_store.load_clean_graph(trajectory_id=trajectory_id)  # type: ignore[attr-defined]
     retrieve_service = RetrieveService(
         semantic_recall=semantic_recall,
+        skill_retriever=skill_retriever,
+        skill_top_k=cfg.retrieve_skills_top_k,
+        skill_score_threshold=cfg.retrieve_skills_score_threshold,
         clean_graph_loader=clean_graph_loader,
         # Retrieve query-graph extraction is currently rule-based only.
         # Keep LLM extractor disabled here to avoid high online latency.

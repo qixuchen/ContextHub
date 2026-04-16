@@ -71,6 +71,14 @@ class AppSettings(BaseModel):
     embedding_mode: str = "multimodal"  # text | multimodal
     llm_model: str = "gpt-4.1-mini"
     openai_api_key: str = ""
+    skill_root: str = "./data/skill"
+    skill_embedding_state_file: str = "./data/index/skill_embedding_state.json"
+    skill_embedding_max_workers: int = 4
+    skill_pgvector_table: str = "amc_skill_index"
+    skill_vector_collection_name: str = "amc_skill_index"
+    retrieve_skills_enabled: bool = True
+    retrieve_skills_top_k: int = 3
+    retrieve_skills_score_threshold: float = 0.2
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -103,6 +111,14 @@ def load_settings(config_path: str | None = None) -> AppSettings:
     audit_raw = raw.get("audit") or {}
     model_raw = raw.get("model_endpoints") or {}
     indexing_raw = raw.get("indexing") or {}
+    retrieve_raw = raw.get("retrieve") or {}
+    retrieve_skills_raw = (
+        (retrieve_raw.get("skills") or {}) if isinstance(retrieve_raw, dict) else {}
+    )
+    skills_raw = raw.get("skills") or {}
+    skill_embedding_raw = (
+        (skills_raw.get("embedding") or {}) if isinstance(skills_raw, dict) else {}
+    )
 
     settings = AppSettings(
         app=AppSection(
@@ -222,4 +238,42 @@ def load_settings(config_path: str | None = None) -> AppSettings:
     # Unified LLM model shared across LLM-powered features.
     settings.llm_model = os.getenv("AMC_LLM_MODEL", str(model_raw.get("llm_model", settings.llm_model))).strip()
     settings.openai_api_key = os.getenv("AMC_OPENAI_API_KEY", settings.openai_api_key)
+    settings.skill_root = os.getenv(
+        "AMC_SKILLS_ROOT",
+        str(skills_raw.get("root", settings.skill_root)),
+    ).strip()
+    settings.skill_embedding_state_file = os.getenv(
+        "AMC_SKILL_EMBEDDING_STATE_FILE",
+        str(skill_embedding_raw.get("state_file", settings.skill_embedding_state_file)),
+    ).strip()
+    settings.skill_embedding_max_workers = int(
+        os.getenv(
+            "AMC_SKILL_EMBEDDING_MAX_WORKERS",
+            str(skill_embedding_raw.get("max_workers", settings.skill_embedding_max_workers)),
+        )
+    )
+    settings.skill_pgvector_table = os.getenv(
+        "AMC_SKILL_EMBEDDING_INDEX_TABLE",
+        str(skill_embedding_raw.get("index_table", settings.skill_pgvector_table)),
+    ).strip()
+    settings.skill_vector_collection_name = os.getenv(
+        "AMC_SKILL_VECTOR_COLLECTION_NAME",
+        str(skill_embedding_raw.get("collection_name", settings.skill_vector_collection_name)),
+    ).strip()
+    settings.retrieve_skills_enabled = os.getenv(
+        "AMC_RETRIEVE_SKILLS_ENABLED",
+        str(retrieve_skills_raw.get("enabled", settings.retrieve_skills_enabled)),
+    ).lower() in {"1", "true", "yes", "on"}
+    settings.retrieve_skills_top_k = int(
+        os.getenv(
+            "AMC_RETRIEVE_SKILLS_TOP_K",
+            str(retrieve_skills_raw.get("top_k", settings.retrieve_skills_top_k)),
+        )
+    )
+    settings.retrieve_skills_score_threshold = float(
+        os.getenv(
+            "AMC_RETRIEVE_SKILLS_SCORE_THRESHOLD",
+            str(retrieve_skills_raw.get("score_threshold", settings.retrieve_skills_score_threshold)),
+        )
+    )
     return settings

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from core.retrieve.semantic_recall import SemanticRecall
+from core.retrieve.skill_retriever import SkillHit
 from core.retrieve.service import RetrieveCommand, RetrieveService
 
 pytestmark = pytest.mark.unit
@@ -357,3 +358,40 @@ def test_semantic_recall_passes_scalar_filters_to_vector_query() -> None:
     assert fake.last_filters.get("exclude_statuses") == ["deleted"]
     assert sorted(fake.last_filters.get("scopes") or []) == ["agent", "team"]
     assert fake.last_filters.get("owner_spaces") == ["team-alpha"]
+
+
+def test_retrieve_service_returns_skill_hits_from_skill_retriever() -> None:
+    class _FakeSkillRetriever:
+        def recall(self, *, query_text: str, top_k: int, score_threshold: float) -> list[SkillHit]:
+            assert query_text
+            assert top_k == 2
+            assert score_threshold == 0.1
+            return [
+                SkillHit(
+                    skill_name="skill_creator",
+                    description="create skills",
+                    uri="ctx://skills/skill_creator",
+                    path="data/skill/skill_creator",
+                    score=0.91,
+                )
+            ]
+
+    service = RetrieveService(
+        semantic_recall=None,
+        skill_retriever=_FakeSkillRetriever(),  # type: ignore[arg-type]
+        skill_top_k=2,
+        skill_score_threshold=0.1,
+    )
+    out = service.run(
+        RetrieveCommand(
+            account_id="acc-1",
+            agent_id="agent-1",
+            query={"task_description": "create a new reusable skill"},
+            top_k=3,
+        )
+    )
+    assert out.items == []
+    assert len(out.skills or []) == 1
+    assert (out.skills or [])[0]["skill_name"] == "skill_creator"
+    assert (out.skill_retrieval_summary or {}).get("hit_count") == 1
+    assert any("semantic recall backend is not configured" in w for w in out.warnings)

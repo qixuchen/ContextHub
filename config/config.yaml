@@ -94,6 +94,10 @@ retrieve:
   top_k_max: 20
   semantic_top_n: 50
   graph_top_n: 50
+  skills:
+    enabled: true
+    top_k: 3
+    score_threshold: 0.2
   rerank:
     with_partial:
       w_sem: 0.45
@@ -104,6 +108,18 @@ retrieve:
       w_fb: 0.10
   stale:
     exclude_by_default: true
+
+# ---------------------------------------------------------------------------
+# Skills（离线 embedding 构建 + 在线检索）
+# ---------------------------------------------------------------------------
+skills:
+  root: "./data/skill"
+  embedding:
+    enabled: true
+    index_table: "amc_skill_index"
+    collection_name: "amc_skill_index"
+    state_file: "./data/index/skill_embedding_state.json"
+    max_workers: 4
 
 # ---------------------------------------------------------------------------
 # 审计
