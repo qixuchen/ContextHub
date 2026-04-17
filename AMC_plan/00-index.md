@@ -42,6 +42,7 @@ AMC 是 ContextHub 在 ToB 场景中的“轨迹记忆中枢”，负责两件�
 | [16-openclaw-plugin-integration-plan.md](16-openclaw-plugin-integration-plan.md) | OpenClaw 集成设计 | AMC 作为 context engine plugin 的分阶段接入与验收方案 |
 | [17-batch-commit-plan.md](17-batch-commit-plan.md) | Batch Commit 设计 | 批量轨迹 commit 的 API、LLM 批处理、FS/Graph/Vector 批写与一致性策略 |
 | [18-skill-retrieve-plan.md](18-skill-retrieve-plan.md) | Skill Recall 设计 | 基于 `description` 的 skill 向量召回、retrieve 响应扩展与增量索引策略 |
+| [19-skill-evolve-trace2skill-plan.md](19-skill-evolve-trace2skill-plan.md) | Skill Evolve/Route 设计 | 复现 Trace2Skill：锚点轨迹召回、并行 patch proposal、分层合并，并支持 update/create 自动路由 |
 
 ## 与主计划文档的映射
 
