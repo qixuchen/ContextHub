@@ -50,16 +50,25 @@ class LLMTrajectorySummarizer:
             return json.loads(raw[start : end + 1])
         return {}
 
-    def summarize(self, steps: list[dict[str, Any]]) -> tuple[str, str]:
-        self.last_traces = []
-        prompt = (
+    @staticmethod
+    def _summary_prompt() -> str:
+        return (
             "You summarize an agent trajectory into two Chinese summaries.\n"
             "Return JSON only: {'l0': str, 'l1': str}.\n"
             "Requirements:\n"
-            "- l0: 100-150 Chinese characters. Include task goal, high-level steps, execution quality/outcome.\n"
-            "- l1: 600-800 Chinese characters. Describe major path, what each stage did, key outputs, failures/retries, and final effect.\n"
-            "- Be factual and concise. Do not invent details not present in trajectory."
+            "- l0: 100-180 Chinese characters. Include task goal, core route, and final outcome.\n"
+            "- l1: 1200-1800 Chinese characters. Do NOT over-compress.\n"
+            "- l1 must explicitly state the task goal and completion status near the beginning.\n"
+            "- l1 must include concrete step-level details, not only high-level summary.\n"
+            "- For each key step, explicitly state: (a) what tool/action was used and the input, (b) what was done, (c) key observation/result.\n"
+            "- Include failure/retry/fix details when present, and explain the final successful path.\n"
+            "- Keep all facts grounded in the trajectory. Do not invent unseen details.\n"
+            "- Prefer a structured narrative (e.g., numbered key steps) to improve downstream skill extraction specificity."
         )
+
+    def summarize(self, steps: list[dict[str, Any]]) -> tuple[str, str]:
+        self.last_traces = []
+        prompt = self._summary_prompt()
         client = self._client()
         messages = [
             {"role": "system", "content": prompt},

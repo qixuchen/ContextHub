@@ -83,6 +83,7 @@ def run_evolve(
     account_id: str,
     agent_id: str,
     top_k: int,
+    trajectory_min_score: float,
     include_anchor: bool,
     analyst_mode: str,
     merge_batch_size: int,
@@ -108,6 +109,7 @@ def run_evolve(
         agent_id=agent_id,
         anchor_trajectory_id=anchor_trajectory_id,
         top_k=max(1, int(top_k)),
+        trajectory_min_score=float(trajectory_min_score),
         include_anchor=bool(include_anchor),
     )
     pool_seconds = time.perf_counter() - t_pool0
@@ -166,7 +168,9 @@ def run_evolve(
             "anchor": pool_result.anchor.trajectory_id,
             "neighbor_count": len(pool_result.neighbors),
             "pool_count": len(pool_result.pool),
+            "trajectory_min_score": float(trajectory_min_score),
             "retrieved_trajectory_ids": pool_result.retrieved_trajectory_ids,
+            "retrieved_trajectory_scores": pool_result.retrieved_trajectory_scores,
         },
         "patch_summary": {
             "proposed": len(patches),
@@ -205,6 +209,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent-id", default="agent-local", help="Agent identifier")
     p.add_argument("--top-k", type=int, default=8, help="Neighbor trajectories to retrieve")
     p.add_argument(
+        "--trajectory-min-score",
+        type=float,
+        default=0.7,
+        help="Minimum total_score required to include a retrieved trajectory",
+    )
+    p.add_argument(
         "--exclude-anchor",
         action="store_true",
         help="Exclude anchor trajectory from analyst pool",
@@ -231,6 +241,7 @@ def main() -> int:
         account_id=args.account_id,
         agent_id=args.agent_id,
         top_k=int(args.top_k),
+        trajectory_min_score=float(args.trajectory_min_score),
         include_anchor=not bool(args.exclude_anchor),
         analyst_mode=args.analyst_mode,
         merge_batch_size=int(args.merge_batch_size),

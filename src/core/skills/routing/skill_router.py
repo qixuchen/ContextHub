@@ -57,6 +57,7 @@ class SkillRouteDecision:
     scope_match_level: str
     reasoning: str
     task_type_summary: str
+    suggested_skill_name: str = ""
 
 
 @dataclass
@@ -75,13 +76,13 @@ class SkillRouter:
     @staticmethod
     def summarize_task_type(pool: list[TrajectoryContext]) -> str:
         parts: list[str] = []
-        for item in pool[:5]:
+        for item in pool:
             if item.task_id:
                 parts.append(item.task_id)
             elif item.abstract:
-                parts.append(item.abstract[:120])
+                parts.append(item.abstract)
             elif item.overview:
-                parts.append(item.overview[:120])
+                parts.append(item.overview)
         return " | ".join(parts) or "trajectory task type summary unavailable"
 
     @staticmethod
@@ -90,8 +91,6 @@ class SkillRouter:
             return ""
         desc = _safe_text(candidate_skill.description)
         md = _safe_text(candidate_skill_md)
-        if len(md) > 3000:
-            md = md[:3000]
         return f"{desc}\n\n{md}".strip()
 
     def _heuristic_route(
@@ -109,6 +108,7 @@ class SkillRouter:
                 scope_match_level="low",
                 reasoning="no candidate skill retrieved",
                 task_type_summary=task_summary,
+                suggested_skill_name=task_summary,
             )
         scope_tokens = {
             tok for tok in _safe_text(candidate_scope_text).lower().replace("\n", " ").split() if len(tok) >= 4
@@ -137,6 +137,7 @@ class SkillRouter:
             scope_match_level=level,
             reasoning=f"heuristic token overlap={overlap}",
             task_type_summary=task_summary,
+            suggested_skill_name=task_summary,
         )
 
     def _llm_route(
@@ -154,6 +155,7 @@ class SkillRouter:
                 scope_match_level="low",
                 reasoning="no candidate skill retrieved",
                 task_type_summary=task_summary,
+                suggested_skill_name=task_summary,
             )
         prompt = (
             "You are a skill routing judge.\n"
@@ -161,7 +163,11 @@ class SkillRouter:
             "Hard rule:\n"
             "- Return update ONLY when the candidate skill scope is highly related to trajectory task type.\n"
             "- If relation is medium/low/uncertain, MUST return create.\n"
-            "Output JSON only with keys: decision, confidence, scope_match_level, reasoning, task_type_summary."
+            "For task_type_summary, describe the concrete shared task solved by these trajectories.\n"
+            "Prefer specific, operational details (goal, key objects/entities, mandatory tool/step sequence, success checks),\n"
+            "and avoid generic summaries like domain-level labels.\n"
+            "Also propose suggested_skill_name based on that concrete shared task (short phrase, task-oriented).\n"
+            "Output JSON only with keys: decision, confidence, scope_match_level, reasoning, task_type_summary, suggested_skill_name."
         )
         payload = {
             "candidate_skill": {
@@ -174,10 +180,10 @@ class SkillRouter:
                 {
                     "trajectory_id": t.trajectory_id,
                     "task_id": t.task_id,
-                    "abstract": t.abstract[:220],
-                    "overview": t.overview[:300],
+                    "abstract": t.abstract,
+                    "overview": t.overview,
                 }
-                for t in pool[:8]
+                for t in pool
             ],
             "task_type_summary": task_summary,
         }
@@ -199,12 +205,14 @@ class SkillRouter:
         confidence = _clamp_confidence(data.get("confidence"))
         reasoning = _safe_text(data.get("reasoning")) or "llm decision"
         out_summary = _safe_text(data.get("task_type_summary")) or task_summary
+        suggested_name = _safe_text(data.get("suggested_skill_name")) or out_summary
         return SkillRouteDecision(
             decision=decision,
             confidence=confidence,
             scope_match_level=level,
             reasoning=reasoning,
             task_type_summary=out_summary,
+            suggested_skill_name=suggested_name,
         )
 
     def _apply_hard_guard(self, decision: SkillRouteDecision, has_candidate: bool) -> SkillRouteDecision:
@@ -226,6 +234,7 @@ class SkillRouter:
                     scope_match_level=level or "low",
                     reasoning=reason,
                     task_type_summary=decision.task_type_summary,
+                    suggested_skill_name=decision.suggested_skill_name,
                 )
         return SkillRouteDecision(
             decision=raw_decision,
@@ -233,6 +242,7 @@ class SkillRouter:
             scope_match_level=level or "low",
             reasoning=decision.reasoning,
             task_type_summary=decision.task_type_summary,
+            suggested_skill_name=decision.suggested_skill_name,
         )
 
     def decide(
@@ -258,6 +268,7 @@ class SkillRouter:
                 scope_match_level=_safe_text(data.get("scope_match_level")).lower(),
                 reasoning=_safe_text(data.get("reasoning")),
                 task_type_summary=_safe_text(data.get("task_type_summary")) or self.summarize_task_type(pool),
+                suggested_skill_name=_safe_text(data.get("suggested_skill_name")),
             )
             return self._apply_hard_guard(raw, has_candidate=candidate_skill is not None)
         if self.api_key.strip():

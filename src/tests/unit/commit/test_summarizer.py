@@ -29,4 +29,6 @@ def test_llm_failure_falls_back_to_rule_based() -> None:
     l0, l1 = summarize_trajectory(steps, llm_summarizer=_bad_llm)
     assert "Trajectory with" in l0
     assert "Steps=" in l1
+    assert "Key steps:" in l1
+    assert "tool=local_db_sql" in l1
 

@@ -47,7 +47,8 @@ input: skill_name, anchor_trajectory_id, top_k
   -> load anchor trajectory (replay)
   -> build retrieve query from anchor (task_description + partial_trajectory)
   -> retrieve top_k similar trajectories (semantic + graph hybrid)
-  -> build evolve pool (anchor + neighbors)
+  -> filter by min score threshold (default 0.6)
+  -> build evolve pool (anchor + neighbors that pass threshold)
   -> parallel analyst patch proposal (Phase A: success_only)
   -> hierarchical merge + conflict checks
   -> apply edits to data/skill/{skill_name}/
@@ -66,6 +67,7 @@ output: evolved skill + evolve report
 - `skill_name: str`
 - `anchor_trajectory_id: str`
 - `top_k: int`（默认 8）
+- `trajectory_min_score: float`（默认 0.6；用于 trajectory pool 过滤）
 - `include_anchor: bool`（默认 true）
 - `analyst_mode: "combined" | "error_only" | "success_only"`（默认 success_only；Phase A 仅启用 success_only）
 - `merge_batch_size: int`（默认 8；表示“每轮合并时一个 merge 节点最多同时处理多少个 patch”）
@@ -88,19 +90,39 @@ output: evolved skill + evolve report
 
 ## 19.5 关键实现细节
 
-## 19.5.1 轨迹池构建（依赖现有 retrieve）
+### 19.5.0 Commit 阶段 overview 细节增强（先提高输入质量）
+
+当前 skill 提取过于泛化的一个根因是 overview 信息密度不足。需要先改 commit 侧摘要策略：
+
+1. 放宽 overview 长度上限（相对现状提升约 2-3 倍）；
+2. 明确要求 overview 包含“关键步骤级细节”：
+   - 每个关键阶段用了什么工具；
+   - 每步动作做了什么；
+   - 关键观察/结果是什么；
+   - 失败重试与修正（若存在）；
+3. 允许较长但结构化输出，优先保证可用于后续 skill 提取，而不是过度压缩。
+
+建议在 `LLMTrajectorySummarizer` prompt 中把 `l1` 改为“细节优先”的长摘要（例如 1200-1800 中文字符区间，按实践再调）。
+
+### 19.5.1 轨迹池构建（依赖现有 retrieve）
 
 为复现“broad execution experience”，建议：
 - 默认 `top_k=8` 控制成本；可按效果逐步提高到 12/16（上限再视成本评估）；
 - 返回结果保留相似度分数与证据字段；
+- 对候选轨迹执行最小分数阈值过滤：`score >= trajectory_min_score`（默认 0.6）；
+- 即使过滤后数量不足，也不回填低分轨迹（宁缺毋滥）；
 - 对 highly-duplicate 轨迹做去重（如同一 task、同一 idempotency_key）。
+
+分数口径：
+- 优先使用 retrieve 的融合分数（vector+graph 的 `total_score`）；
+- 当图分支不可用时，回退到 semantic score，但仍应用同一阈值并写入 warning。
 
 ### 19.5.2 Success / Error 分析器
 
 Success analyst 输入：
 - trajectory 原文
 - 当前 skill 目录快照
-- 目标：抽取可泛化 SOP（不是 task-specific trick）
+- 目标：抽取“同类任务簇下可复用、但足够具体”的 SOP（specificity 优先，避免 domain 级泛化）
 
 Error analyst 输入：
 - trajectory + 失败迹象（若可得）
@@ -272,6 +294,9 @@ merge 提示中显式要求：
 Success analyst（单次调用）：
 - 提炼成功轨迹中的可泛化行为模式；
 - 要求“广覆盖 + 频次优先 + 可操作”；
+- 增加硬约束：**specificity 优先于 generality**；
+- 禁止输出过宽泛技能（例如覆盖整个 domain 的大而空描述）；
+- 优先输出“聚焦某一类任务簇”的 SOP（例如 `clean-and-place`、`search-then-relocate` 级别）；
 - 输出紧凑 memory/patch，不写任务特例。
 
 Error analyst（多轮 ReAct）：
@@ -388,6 +413,9 @@ Merge operator（合并器）：
 ### Phase A1（Route MVP）
 - `amc-route-skill` 可跑通；
 - skill top-1 + trajectory pool + LLM route；
+- commit 摘要 prompt 升级（overview 更细，支持步骤级工具/动作细节）；
+- trajectory pool 增加 `trajectory_min_score` 过滤（默认 0.6，且不回填低分）；
+- success analyst prompt 增加 “specificity > generality” 硬约束；
 - `update` 复用 evolve；
 - `create` 走模板创建；
 - 两分支都刷新 embedding。
@@ -412,5 +440,7 @@ Merge operator（合并器）：
 4. `update` 路径会修改已有 skill；
 5. `create` 路径会生成新 skill 目录；
 6. 两路径结束后都刷新 skill embedding；
-7. 不影响已有 `amc-evolve-skill --skill-name ...` 与 retrieve/commit 主链路。
+7. trajectory pool 过滤遵循 `trajectory_min_score`，低分轨迹不会被拼进同一 skill 提取；
+8. 输出 skill 不应出现“过于宽泛”的 scope（需通过 specificity 检查规则）；
+9. 不影响已有 `amc-evolve-skill --skill-name ...` 与 retrieve/commit 主链路。
 

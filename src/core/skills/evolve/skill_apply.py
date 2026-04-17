@@ -19,6 +19,23 @@ def _safe_text(value: str) -> str:
     return str(value or "").strip()
 
 
+def _fallback_parse_frontmatter(yaml_text: str) -> dict:
+    meta: dict[str, str] = {}
+    for raw_line in yaml_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        k = key.strip()
+        v = value.strip()
+        if not k:
+            continue
+        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+            v = v[1:-1]
+        meta[k] = v
+    return meta
+
+
 def _split_frontmatter(raw: str) -> tuple[dict, str, bool]:
     text = raw.replace("\r\n", "\n")
     if not text.startswith("---\n"):
@@ -36,9 +53,9 @@ def _split_frontmatter(raw: str) -> tuple[dict, str, bool]:
     try:
         meta = yaml.safe_load(yaml_text) or {}
     except Exception:
-        meta = {}
+        meta = _fallback_parse_frontmatter(yaml_text)
     if not isinstance(meta, dict):
-        meta = {}
+        meta = _fallback_parse_frontmatter(yaml_text)
     return meta, body, True
 
 
@@ -65,7 +82,7 @@ def _compose_description(old_desc: str, rules: list[MergedSuccessRule]) -> str:
         merged = f"{base} | Evolved focus: {focus}".strip()
     else:
         merged = f"Evolved focus: {focus}".strip()
-    return merged[:320]
+    return merged
 
 
 def _render_success_block(*, rules: list[MergedSuccessRule], generated_at: str) -> str:
@@ -154,6 +171,8 @@ def apply_merged_success_rules(
     raw = skill_md_path.read_text(encoding="utf-8")
     meta, body, has_frontmatter = _split_frontmatter(raw)
     old_desc = _safe_text(meta.get("description"))
+    if not _safe_text(meta.get("name")):
+        meta["name"] = skill_md_path.parent.name
     new_desc = _compose_description(old_desc, rules)
     description_updated = bool(new_desc and new_desc != old_desc)
     if description_updated:

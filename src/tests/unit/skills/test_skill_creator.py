@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from core.skills.create.skill_creator import (
     create_skill_from_trajectories,
@@ -12,6 +13,21 @@ from core.skills.create.skill_creator import (
 from core.skills.evolve.types import TrajectoryContext
 
 pytestmark = pytest.mark.unit
+
+
+def _extract_frontmatter(markdown: str) -> dict:
+    lines = markdown.splitlines()
+    assert lines and lines[0].strip() == "---"
+    end = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
+            break
+    assert end is not None
+    raw = "\n".join(lines[1:end])
+    loaded = yaml.safe_load(raw)
+    assert isinstance(loaded, dict)
+    return loaded
 
 
 def _pool() -> list[TrajectoryContext]:
@@ -55,4 +71,39 @@ def test_create_skill_from_trajectories_writes_skill_md(tmp_path: Path) -> None:
     assert "name:" in text
     assert "## Evidence Trajectories" in text
     assert "`traj-1`" in text
+    frontmatter = _extract_frontmatter(text)
+    assert frontmatter["name"] == out.skill_name
+    assert isinstance(frontmatter.get("description"), str)
+
+
+def test_create_skill_frontmatter_is_yaml_safe_with_colons(tmp_path: Path) -> None:
+    out = create_skill_from_trajectories(
+        skill_root=str(tmp_path),
+        task_type_summary="alfworld: kitchen > put apple on table",
+        pool=_pool(),
+        existing_names=set(),
+        dry_run=False,
+    )
+    text = Path(out.skill_md_path).read_text(encoding="utf-8")
+    frontmatter = _extract_frontmatter(text)
+    assert frontmatter["name"] == out.skill_name
+    assert "Focuses on:" in frontmatter["description"]
+
+
+def test_create_skill_description_not_truncated(tmp_path: Path) -> None:
+    task_summary = (
+        "alfworld kitchen cleanup and object relocation with explicit navigation checkpoints, "
+        "container open/close verification, object pickup retries, and final placement validation "
+        "on requested receptacle"
+    )
+    out = create_skill_from_trajectories(
+        skill_root=str(tmp_path),
+        task_type_summary=task_summary,
+        pool=_pool(),
+        existing_names=set(),
+        dry_run=False,
+    )
+    text = Path(out.skill_md_path).read_text(encoding="utf-8")
+    frontmatter = _extract_frontmatter(text)
+    assert task_summary in frontmatter["description"]
 

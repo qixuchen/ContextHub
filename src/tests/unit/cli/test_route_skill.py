@@ -24,6 +24,7 @@ def _fake_pool_result() -> SimpleNamespace:
         neighbors=[],
         pool=[anchor],
         retrieved_trajectory_ids=[],
+        retrieved_trajectory_scores=[],
         query_payload={"task_description": "task"},
         warnings=[],
     )
@@ -47,6 +48,7 @@ def _fake_settings() -> SimpleNamespace:
 def test_build_parser_defaults_for_route_phase_a1() -> None:
     args = build_parser().parse_args(["--anchor-trajectory-id", "traj-1"])
     assert args.top_k == 8
+    assert args.trajectory_min_score == 0.7
     assert args.skill_top_k == 1
     assert args.merge_batch_size == 8
     assert args.force_mode == "auto"
@@ -96,6 +98,7 @@ def test_run_route_auto_update_branch(monkeypatch) -> None:
                 scope_match_level="high",
                 reasoning="aligned",
                 task_type_summary="summary",
+                suggested_skill_name="spreadsheet_formula_repair",
             )
 
     monkeypatch.setattr("cli.route_skill.SkillRouter", _FakeRouter)
@@ -109,6 +112,7 @@ def test_run_route_auto_update_branch(monkeypatch) -> None:
         account_id="acc",
         agent_id="agent",
         top_k=8,
+        trajectory_min_score=0.7,
         skill_top_k=1,
         include_anchor=True,
         merge_batch_size=8,
@@ -119,6 +123,7 @@ def test_run_route_auto_update_branch(monkeypatch) -> None:
         config_path=None,
     )
     assert out["decision"]["decision"] == "update"
+    assert out["decision"]["suggested_skill_name"] == "spreadsheet_formula_repair"
     assert out["updated_skill_name"] == "skill_creator"
     assert out["created_skill_name"] is None
 
@@ -153,6 +158,7 @@ def test_run_route_auto_create_branch(monkeypatch) -> None:
                 scope_match_level="low",
                 reasoning="no match",
                 task_type_summary="summary",
+                suggested_skill_name="spreadsheet_formula_repair",
             )
 
     monkeypatch.setattr("cli.route_skill.SkillRouter", _FakeRouter)
@@ -172,6 +178,7 @@ def test_run_route_auto_create_branch(monkeypatch) -> None:
         account_id="acc",
         agent_id="agent",
         top_k=8,
+        trajectory_min_score=0.7,
         skill_top_k=1,
         include_anchor=True,
         merge_batch_size=8,
@@ -182,6 +189,7 @@ def test_run_route_auto_create_branch(monkeypatch) -> None:
         config_path=None,
     )
     assert out["decision"]["decision"] == "create"
+    assert out["decision"]["suggested_skill_name"] == "spreadsheet_formula_repair"
     assert out["updated_skill_name"] is None
     assert out["created_skill_name"] == "skill_auto_test"
 

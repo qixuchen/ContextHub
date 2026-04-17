@@ -87,10 +87,10 @@ def _build_skill_retriever(settings) -> tuple[SkillRetriever | None, list[str]]:
 def _build_skill_query_text(pool_result) -> str:  # noqa: ANN001
     task_description = _safe_text((pool_result.query_payload or {}).get("task_description"))
     snippets: list[str] = []
-    for item in pool_result.pool[:4]:
+    for item in pool_result.pool:
         text = _safe_text(item.abstract) or _safe_text(item.overview)
         if text:
-            snippets.append(text[:160])
+            snippets.append(text)
     parts = [task_description] if task_description else []
     if snippets:
         parts.append(" | ".join(snippets))
@@ -118,6 +118,7 @@ def _forced_decision(mode: str, pool_summary: str) -> SkillRouteDecision:
             scope_match_level="high",
             reasoning="force_mode=update",
             task_type_summary=pool_summary,
+            suggested_skill_name=pool_summary,
         )
     return SkillRouteDecision(
         decision="create",
@@ -125,6 +126,7 @@ def _forced_decision(mode: str, pool_summary: str) -> SkillRouteDecision:
         scope_match_level="low",
         reasoning="force_mode=create",
         task_type_summary=pool_summary,
+        suggested_skill_name=pool_summary,
     )
 
 
@@ -134,6 +136,7 @@ def run_route(
     account_id: str,
     agent_id: str,
     top_k: int,
+    trajectory_min_score: float,
     skill_top_k: int,
     include_anchor: bool,
     merge_batch_size: int,
@@ -157,6 +160,7 @@ def run_route(
         agent_id=agent_id,
         anchor_trajectory_id=anchor_trajectory_id,
         top_k=max(1, int(top_k)),
+        trajectory_min_score=float(trajectory_min_score),
         include_anchor=bool(include_anchor),
     )
     pool_seconds = time.perf_counter() - t_pool0
@@ -191,6 +195,7 @@ def run_route(
                 scope_match_level="low",
                 reasoning="force update requested but no candidate skill found; fallback create",
                 task_type_summary=decision.task_type_summary,
+                suggested_skill_name=decision.suggested_skill_name,
             )
             warnings.append("force update fallback to create: no candidate skill")
     else:
@@ -211,6 +216,7 @@ def run_route(
             account_id=account_id,
             agent_id=agent_id,
             top_k=max(1, int(top_k)),
+            trajectory_min_score=float(trajectory_min_score),
             include_anchor=bool(include_anchor),
             analyst_mode="success_only",
             merge_batch_size=max(1, int(merge_batch_size)),
@@ -229,6 +235,7 @@ def run_route(
             task_type_summary=decision.task_type_summary,
             pool=pool_result.pool,
             existing_names=existing_names,
+            name_seed=decision.suggested_skill_name,
             dry_run=bool(dry_run),
         )
         create_seconds = time.perf_counter() - t_create0
@@ -262,6 +269,7 @@ def run_route(
             "scope_match_level": decision.scope_match_level,
             "reasoning": decision.reasoning,
             "task_type_summary": decision.task_type_summary,
+            "suggested_skill_name": decision.suggested_skill_name,
         },
         "candidate_skill": (
             {
@@ -280,7 +288,9 @@ def run_route(
             "anchor": pool_result.anchor.trajectory_id,
             "neighbor_count": len(pool_result.neighbors),
             "pool_count": len(pool_result.pool),
+            "trajectory_min_score": float(trajectory_min_score),
             "retrieved_trajectory_ids": pool_result.retrieved_trajectory_ids,
+            "retrieved_trajectory_scores": pool_result.retrieved_trajectory_scores,
         },
         "branch_result": branch_result,
         "embedding_refresh_summary": embedding_refresh_summary,
@@ -302,6 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--account-id", default="account-local", help="Account identifier")
     p.add_argument("--agent-id", default="agent-local", help="Agent identifier")
     p.add_argument("--top-k", type=int, default=8, help="Neighbor trajectories to retrieve")
+    p.add_argument(
+        "--trajectory-min-score",
+        type=float,
+        default=0.7,
+        help="Minimum total_score required to include a retrieved trajectory",
+    )
     p.add_argument("--skill-top-k", type=int, default=1, help="Candidate skill top-k before routing")
     p.add_argument(
         "--exclude-anchor",
@@ -335,6 +351,7 @@ def main() -> int:
         account_id=args.account_id,
         agent_id=args.agent_id,
         top_k=int(args.top_k),
+        trajectory_min_score=float(args.trajectory_min_score),
         skill_top_k=int(args.skill_top_k),
         include_anchor=not bool(args.exclude_anchor),
         merge_batch_size=int(args.merge_batch_size),

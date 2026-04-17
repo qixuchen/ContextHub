@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from core.skills.evolve.analyst_success import SuccessAnalyst
 from core.skills.evolve.patch_merge import hierarchical_merge_success_patches
@@ -79,4 +80,38 @@ def test_merge_and_apply_success_rules_updates_skill_md_and_reference(tmp_path: 
     assert "Evolved focus:" in updated
     assert out.rule_count == 1
     assert Path(out.reference_path).exists()
+
+
+def test_apply_rewrites_invalid_frontmatter_to_yaml_safe(tmp_path: Path) -> None:
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text(
+        (
+            "---\n"
+            "name: skill-y\n"
+            "description: Auto-created from trajectory evidence. Focuses on: bad yaml token\n"
+            "---\n"
+            "# Skill Y\n"
+        ),
+        encoding="utf-8",
+    )
+    rules = [
+        SuccessPatch(
+            trajectory_id="traj-3",
+            title="Stable check",
+            sop="Verify result format before answer.",
+            checklist=["verify"],
+            evidence="ok",
+        )
+    ]
+    merged = hierarchical_merge_success_patches(rules, merge_batch_size=1)
+    apply_merged_success_rules(skill_md_path=skill_md, rules=merged.rules, dry_run=False)
+
+    text = skill_md.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert lines[0].strip() == "---"
+    end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    frontmatter = yaml.safe_load("\n".join(lines[1:end]))
+    assert isinstance(frontmatter, dict)
+    assert frontmatter.get("name") == "skill-y"
+    assert isinstance(frontmatter.get("description"), str)
 
