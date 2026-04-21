@@ -127,6 +127,7 @@ def test_i01b_post_batch_commit_accepted(sample_traj_dir: Path, tmp_path: Path) 
     assert body["summary"]["failed"] == 0
     assert body["summary"]["skipped"] == 0
     assert len(body["items"]) == 2
+    assert "intertrajectory_batch_trigger_summary" in body
     for item in body["items"]:
         assert item["status"] == "accepted"
         tid = str(item["trajectory_id"])

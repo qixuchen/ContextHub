@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import load_settings
+from app.intertrajectory import build_intertrajectory_linker, build_intertrajectory_trigger
 from app.orchestrators.commit_orchestrator import CommitOrchestrator
 from core.commit.dataflow_llm import LLMDataflowExtractor
 from core.commit.service import CommitCommand, CommitService
@@ -55,13 +56,17 @@ def run_commit(
     repo = LocalFSTrajectoryRepository(root=settings.storage.localfs_root)
     audit = JsonlAuditLogger(file_path=settings.storage.audit_file_path)
     graph_store = build_graph_store_writer(settings)
+    vector_store = None
+    try:
+        vector_store = build_vector_store_adapter(settings)
+    except Exception as exc:
+        print(f"[AMC] vector store disabled for commit runtime: {type(exc).__name__}: {exc}")
     vector_indexer = None
     if (
         settings.indexing_async_enabled
         and settings.embedding_provider.lower() == "openai"
         and settings.openai_api_key
     ):
-        vector_store = build_vector_store_adapter(settings)
         if vector_store is not None and settings.indexing_include_levels:
             vector_indexer = TrajectoryVectorIndexer(
                 vector_store=vector_store,
@@ -71,6 +76,16 @@ def run_commit(
                 embedding_mode=settings.embedding_mode,
                 include_levels=tuple(int(x) for x in settings.indexing_include_levels),
             )
+    intertrajectory_linker = build_intertrajectory_linker(
+        settings=settings,
+        repo=repo,
+        graph_store=graph_store,
+        vector_store=vector_store,
+    )
+    intertrajectory_trigger = build_intertrajectory_trigger(
+        settings=settings,
+        graph_store=graph_store,
+    )
     dataflow_extractor = None
     llm_summarizer = None
     if settings.openai_api_key:
@@ -111,6 +126,9 @@ def run_commit(
         audit=audit,
         graph_store=graph_store,
         vector_indexer=vector_indexer,
+        intertrajectory_linker=intertrajectory_linker,
+        intertrajectory_trigger=intertrajectory_trigger,
+        intertrajectory_batch_trigger_mode=settings.intertrajectory_batch_trigger_mode,
         idempotency_enabled=idempotency_enabled,
     )
 
@@ -143,6 +161,11 @@ def run_commit(
         "warnings": commit_result.warnings,
         "neo4j": commit_result.payload.get("neo4j_summary", {"enabled": False}),
         "vector_index": commit_result.payload.get("vector_index_summary", {"enabled": False}),
+        "intertrajectory": commit_result.payload.get("intertrajectory_summary", {"enabled": False}),
+        "intertrajectory_trigger": commit_result.payload.get(
+            "intertrajectory_trigger_summary",
+            {"enabled": False},
+        ),
         "storage": {
             "base_path": str(base),
             "l0_abstract_path": str(base / ".abstract.md"),

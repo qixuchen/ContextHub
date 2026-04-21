@@ -58,7 +58,7 @@ def is_retryable_llm_error(exc: Exception) -> bool:
 
 def default_retry_config() -> dict[str, float | int]:
     return {
-        "max_concurrency": int(os.getenv("AMC_LLM_MAX_CONCURRENCY", "4")),
+        "max_concurrency": int(os.getenv("AMC_LLM_MAX_CONCURRENCY", "6")),
         "max_retries": int(os.getenv("AMC_LLM_MAX_RETRIES", "5")),
         "base_backoff_seconds": float(os.getenv("AMC_LLM_BACKOFF_BASE_SECONDS", "1.0")),
         "max_backoff_seconds": float(os.getenv("AMC_LLM_BACKOFF_MAX_SECONDS", "15.0")),

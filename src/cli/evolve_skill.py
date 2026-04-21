@@ -90,6 +90,7 @@ def run_evolve(
     max_parallel_analysts: int,
     dry_run: bool,
     config_path: str | None,
+    pool_override=None,  # noqa: ANN001
 ) -> dict[str, Any]:
     if analyst_mode != "success_only":
         raise ValueError("Phase A only supports analyst_mode=success_only")
@@ -100,19 +101,24 @@ def run_evolve(
     skill_doc, skill_loader_warnings = _load_skill_doc(skill_root=settings.skill_root, skill_name=skill_name)
     skill_markdown = Path(skill_doc.skill_md_path).read_text(encoding="utf-8")
 
-    retrieve_service, retrieve_warnings = _build_retrieve_service(settings)
-    repo = LocalFSTrajectoryRepository(root=settings.storage.localfs_root)
-    pool_builder = TrajectoryPoolBuilder(repo=repo, retrieve_service=retrieve_service)
-    t_pool0 = time.perf_counter()
-    pool_result = pool_builder.build_success_pool(
-        account_id=account_id,
-        agent_id=agent_id,
-        anchor_trajectory_id=anchor_trajectory_id,
-        top_k=max(1, int(top_k)),
-        trajectory_min_score=float(trajectory_min_score),
-        include_anchor=bool(include_anchor),
-    )
-    pool_seconds = time.perf_counter() - t_pool0
+    retrieve_warnings: list[str] = []
+    if pool_override is None:
+        retrieve_service, retrieve_warnings = _build_retrieve_service(settings)
+        repo = LocalFSTrajectoryRepository(root=settings.storage.localfs_root)
+        pool_builder = TrajectoryPoolBuilder(repo=repo, retrieve_service=retrieve_service)
+        t_pool0 = time.perf_counter()
+        pool_result = pool_builder.build_success_pool(
+            account_id=account_id,
+            agent_id=agent_id,
+            anchor_trajectory_id=anchor_trajectory_id,
+            top_k=max(1, int(top_k)),
+            trajectory_min_score=float(trajectory_min_score),
+            include_anchor=bool(include_anchor),
+        )
+        pool_seconds = time.perf_counter() - t_pool0
+    else:
+        pool_result = pool_override
+        pool_seconds = 0.0
 
     analyst = SuccessAnalyst(
         model=settings.llm_model,
@@ -168,7 +174,9 @@ def run_evolve(
             "anchor": pool_result.anchor.trajectory_id,
             "neighbor_count": len(pool_result.neighbors),
             "pool_count": len(pool_result.pool),
-            "trajectory_min_score": float(trajectory_min_score),
+            "trajectory_min_score": (
+                float(trajectory_min_score) if trajectory_min_score is not None else None
+            ),
             "retrieved_trajectory_ids": pool_result.retrieved_trajectory_ids,
             "retrieved_trajectory_scores": pool_result.retrieved_trajectory_scores,
         },

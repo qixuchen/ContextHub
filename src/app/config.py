@@ -79,6 +79,15 @@ class AppSettings(BaseModel):
     retrieve_skills_enabled: bool = True
     retrieve_skills_top_k: int = 3
     retrieve_skills_score_threshold: float = 0.2
+    intertrajectory_enabled: bool = True
+    intertrajectory_backend: str = "neo4j"
+    intertrajectory_edge_threshold: float = 0.7
+    intertrajectory_trigger_threshold: int = 8
+    intertrajectory_max_neighbors_per_commit: int = 32
+    intertrajectory_edge_rel_type: str = "INTERTRAJ_SIMILAR"
+    intertrajectory_pending_rel_type: str = "INTERTRAJ_ACTIVATED_PENDING"
+    intertrajectory_async_trigger: bool = True
+    intertrajectory_batch_trigger_mode: str = "end_of_batch"
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -118,6 +127,9 @@ def load_settings(config_path: str | None = None) -> AppSettings:
     skills_raw = raw.get("skills") or {}
     skill_embedding_raw = (
         (skills_raw.get("embedding") or {}) if isinstance(skills_raw, dict) else {}
+    )
+    intertrajectory_raw = (
+        (skills_raw.get("intertrajectory") or {}) if isinstance(skills_raw, dict) else {}
     )
 
     settings = AppSettings(
@@ -276,4 +288,51 @@ def load_settings(config_path: str | None = None) -> AppSettings:
             str(retrieve_skills_raw.get("score_threshold", settings.retrieve_skills_score_threshold)),
         )
     )
+    settings.intertrajectory_enabled = os.getenv(
+        "AMC_INTERTRAJECTORY_ENABLED",
+        str(intertrajectory_raw.get("enabled", settings.intertrajectory_enabled)),
+    ).lower() in {"1", "true", "yes", "on"}
+    settings.intertrajectory_backend = os.getenv(
+        "AMC_INTERTRAJECTORY_BACKEND",
+        str(intertrajectory_raw.get("backend", settings.intertrajectory_backend)),
+    ).strip()
+    settings.intertrajectory_edge_threshold = float(
+        os.getenv(
+            "AMC_INTERTRAJECTORY_EDGE_THRESHOLD",
+            str(intertrajectory_raw.get("edge_threshold", settings.intertrajectory_edge_threshold)),
+        )
+    )
+    settings.intertrajectory_trigger_threshold = int(
+        os.getenv(
+            "AMC_INTERTRAJECTORY_TRIGGER_THRESHOLD",
+            str(intertrajectory_raw.get("trigger_threshold", settings.intertrajectory_trigger_threshold)),
+        )
+    )
+    settings.intertrajectory_max_neighbors_per_commit = int(
+        os.getenv(
+            "AMC_INTERTRAJECTORY_MAX_NEIGHBORS_PER_COMMIT",
+            str(
+                intertrajectory_raw.get(
+                    "max_neighbors_per_commit",
+                    settings.intertrajectory_max_neighbors_per_commit,
+                )
+            ),
+        )
+    )
+    settings.intertrajectory_edge_rel_type = os.getenv(
+        "AMC_INTERTRAJECTORY_EDGE_REL_TYPE",
+        str(intertrajectory_raw.get("edge_rel_type", settings.intertrajectory_edge_rel_type)),
+    ).strip()
+    settings.intertrajectory_pending_rel_type = os.getenv(
+        "AMC_INTERTRAJECTORY_PENDING_REL_TYPE",
+        str(intertrajectory_raw.get("pending_rel_type", settings.intertrajectory_pending_rel_type)),
+    ).strip()
+    settings.intertrajectory_async_trigger = os.getenv(
+        "AMC_INTERTRAJECTORY_ASYNC_TRIGGER",
+        str(intertrajectory_raw.get("async_trigger", settings.intertrajectory_async_trigger)),
+    ).lower() in {"1", "true", "yes", "on"}
+    settings.intertrajectory_batch_trigger_mode = os.getenv(
+        "AMC_INTERTRAJECTORY_BATCH_TRIGGER_MODE",
+        str(intertrajectory_raw.get("batch_trigger_mode", settings.intertrajectory_batch_trigger_mode)),
+    ).strip()
     return settings

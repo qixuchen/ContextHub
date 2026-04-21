@@ -444,3 +444,248 @@ Merge operator（合并器）：
 8. 输出 skill 不应出现“过于宽泛”的 scope（需通过 specificity 检查规则）；
 9. 不影响已有 `amc-evolve-skill --skill-name ...` 与 retrieve/commit 主链路。
 
+---
+
+## 19.18 新增链路：Commit -> InterTrajectory Graph -> Route（自动触发）
+
+目标：在保留现有 `amc-evolve-skill` / `amc-route-skill` 手动链路的前提下，新增一条由 commit 驱动的自动链路。
+
+核心思路：
+1. 每条已 commit trajectory 是 inter-trajectory graph 的一个节点；
+2. 新节点 `A` 入图后，和现有节点 `B` 计算融合分数（semantic + graph）；
+3. 若 `score >= intertraj_edge_threshold`（默认 0.7），则建立 `A <-> B` 无向边；
+4. 边建立后，`A` 与 `B` 互相加入对方 activate 列表（pending 累积）；
+5. 当某节点 `X` 的 activate 数达到阈值 `activate_trigger_threshold`（默认 8），触发一次 skill route：
+   - candidate trajectories = `X + activate(X)`；
+   - 复用现有 route/update/create 逻辑；
+   - route 结束后清空 `activate(X)`，重新累积。
+
+说明：这里的“触发 route”是**候选集驱动**，不再从 retrieve 相似度检索候选轨迹；候选轨迹直接来自 activate 列表。
+
+### 19.18.1 与现有 Route 门禁的关系
+
+- 现有 route 门禁：`support`（默认 4）；
+- 新增 activate 触发门槛：`activate_trigger_threshold`（默认 8）；
+- 两者关系：先满足 activate 触发（>=8）才进入 route；进入 route 后仍保留 `support` 校验（双保险）。
+
+---
+
+## 19.19 设计细化（最小侵入，最大复用）
+
+### 19.19.1 数据模型（新增，直接落 Neo4j）
+
+建议新增 inter-trajectory graph 状态存储（按 account/scope/owner_space 隔离）：
+
+- `(:Trajectory {trajectory_id, account_id, scope, owner_space, ...})`
+- `(:Trajectory)-[:INTERTRAJ_SIMILAR {score_total, score_semantic, score_graph, created_at}]-(:Trajectory)`
+  - 逻辑上无向边；存储上可统一为一条关系（`min_id -> max_id`）避免重复。
+- `(:Trajectory)-[:INTERTRAJ_ACTIVATED_PENDING {created_at}]->(:Trajectory)`
+  - 表示“源节点的 activate 列表中存在目标节点”。
+- `(:Trajectory {last_intertraj_triggered_at})`
+  - 记录最近一次触发 route 的时间，便于审计和重试。
+
+结论：该状态层按你的建议，默认直接使用 Neo4j，不再以本地状态文件作为主实现。
+
+### 19.19.2 Commit 后处理流程（新增）
+
+挂载点：
+- 单条 commit：`CommitOrchestrator._persist_prepared_commit()` 成功持久化后（`status=accepted`）；
+- batch commit：`/commit/batch` 全部 item 完成后统一触发一次（见 19.19.3）。
+
+流程：
+1. 以新 trajectory `A` 构建 query（复用 `TrajectoryPoolBuilder` 的 anchor query 生成策略）；
+2. 调用 retrieve（semantic + graph）获取候选旧节点；
+3. 对每个候选 `B`：
+   - 若 `total_score >= intertraj_edge_threshold`（默认 0.7）则建边 `A<->B`；
+   - 同时 `A.pending += B`，`B.pending += A`（去重）；
+4. 将 activate pending 写入 Neo4j（`A -> B` 与 `B -> A`）；
+5. 单条 commit 模式下，检查 `A.pending` 是否达到 `activate_trigger_threshold`（默认 8）；
+6. 若达到阈值，触发 route 执行（candidate trajectories = `A + A.pending`）。
+
+备注：commit API 本身应保持低延迟，route 触发建议异步执行（后台 worker / 事件队列）。
+
+### 19.19.3 Batch Commit 触发语义（新增）
+
+按你的建议，batch commit 采用“整批结束后统一触发”：
+
+1. batch 内每个成功 item 仍正常建边并更新 pending（写 Neo4j）；
+2. 不在单个 item 完成时立即触发 route；
+3. 等 batch 全部 item 处理完后，统一扫描“本批涉及节点”中 pending 达阈值的锚点；
+4. 对达阈值锚点逐个触发 route（可串行或限流并行）；
+5. 每个锚点 route 完成后清空其 pending，再处理下一个锚点。
+
+这样能避免 batch 内重复触发、降低抖动，并保证同一批新增轨迹能共同参与一次更完整的候选集。
+
+### 19.19.4 Route 复用方式（关键）
+
+在 `src/cli/route_skill.py` 上增加“显式候选池入口”（内部函数或 CLI 参数）：
+
+- 新增内部函数（建议）：
+  - `run_route_with_candidates(anchor_trajectory_id, candidate_trajectory_ids, ...)`
+- 行为：
+  1. 跳过 `TrajectoryPoolBuilder.build_success_pool` 的相似检索；
+  2. 直接加载 candidate trajectories 组装 `pool_result`；
+  3. 后续完全复用现有 route 逻辑（candidate skill recall + LLM route + update/create 分支）。
+
+这样不改动既有 `amc-route-skill` 默认行为，仅新增可复用入口供 commit 自动链路调用。
+
+### 19.19.5 activate 清空策略
+
+按需求：当节点 `X` 触发并完成一次 route 后，清空 `X.pending`。
+
+实现建议：
+- route 终态为 `update` / `create` / `support_insufficient` 时都清空 `X.pending`；
+- 若是系统异常（例如依赖不可用）则不清空，保留重试机会，并记录 warning/audit。
+
+---
+
+## 19.20 配置项扩展（建议默认值）
+
+在 `config` + `AppSettings` 增加：
+
+- `skills.intertrajectory.enabled: true`
+- `skills.intertrajectory.edge_threshold: 0.7`
+- `skills.intertrajectory.trigger_threshold: 8`
+- `skills.intertrajectory.max_neighbors_per_commit: 32`（防止单次 commit 扫描过大）
+- `skills.intertrajectory.backend: neo4j`
+- `skills.intertrajectory.edge_rel_type: INTERTRAJ_SIMILAR`
+- `skills.intertrajectory.pending_rel_type: INTERTRAJ_ACTIVATED_PENDING`
+- `skills.intertrajectory.async_trigger: true`
+- `skills.intertrajectory.batch_trigger_mode: end_of_batch`
+
+并复用现有 route 参数：
+- `trajectory_min_score`（默认 0.7）
+- `support`（默认 4）
+
+---
+
+## 19.21 代码改造增量（在 19.6 基础上叠加）
+
+### 新增模块（建议）
+
+- `src/core/skills/intertrajectory/neo4j_state_store.py`
+  - 读写 inter-trajectory graph 状态（节点 pending、边信息，Neo4j 实现）
+- `src/core/skills/intertrajectory/linker.py`
+  - 处理“新节点入图 -> 建边 -> activate 累积”
+- `src/core/skills/intertrajectory/trigger.py`
+  - 达阈值后组装 candidate trajectories 并调用 route 入口
+
+### 修改模块（建议）
+
+- `src/app/orchestrators/commit_orchestrator.py`
+  - 单条 commit 成功后发布 intertrajectory link/trigger 任务
+- `src/api/routes/commit.py`
+  - batch commit 在“整批结束”后统一触发 intertrajectory route 扫描
+- `src/cli/route_skill.py`
+  - 增加“候选轨迹直传”入口（复用 route 主逻辑）
+- `src/app/config.py`
+  - 增加 intertrajectory 配置项
+
+---
+
+## 19.22 测试与验收补充（commit->route 自动链路）
+
+1. 新节点 `A` 与旧节点 `B` 分数>=0.7 时，建立无向边，且互相写入 pending activate；
+2. 分数<0.7 不建边，pending 不增加；
+3. 单条 commit 下，`pending(A)` 达到 8 时自动触发 route；
+4. batch commit 下，必须等整批 commit 完成后才统一触发 route；
+5. 自动触发 route 使用 `A + pending(A)` 作为候选集，不再做候选相似检索；
+6. route 完成后仅清空触发节点的 pending 列表；
+7. route 异常时 pending 不清空，并可重试；
+8. 不影响手动 `amc-route-skill` / `amc-evolve-skill` 既有行为；
+9. batch commit 场景下多节点并发入图，边与 pending 无丢失（含并发写一致性测试）。
+
+---
+
+## 19.23 统一实施 Phase（整合版）
+
+为避免当前文档中 Phase A/B/C、A1/A2 并行描述造成歧义，后续按以下**5 个 Phase**推进（含新链路）：
+
+### Phase 1：Evolve/Route 基线收敛（已实现能力固化）
+
+状态：已完成（进入维护态，后续作为 Phase 2+ 的回归基线）。
+
+范围：
+- 固化 `amc-evolve-skill` + `amc-route-skill` 当前主流程；
+- 固化 `trajectory_min_score`、`support`、hard guard、specificity 约束；
+- 固化 create/update 双分支与 embedding 刷新闭环。
+
+目标：
+- 手动 route/evolve 行为稳定、可回归、可观测，作为 commit 自动触发链路的基础。
+
+验收：
+- 通过现有 route/evolve 单测与关键集成测试；
+- 同一输入在多次运行下决策与输出差异可控。
+
+### Phase 2：InterTrajectory Graph 基础层（Neo4j）
+
+状态：已完成（建边与 pending 累积已接入 commit；自动触发 route 留到 Phase 3/4）。
+
+范围：
+- 在 Neo4j 中落地 `INTERTRAJ_SIMILAR` 与 `INTERTRAJ_ACTIVATED_PENDING`；
+- 实现新节点入图后建边与 pending 累积（仅状态更新，不触发 route）；
+- 增加幂等与去重规则（避免重复边、重复 pending）。
+
+目标：
+- 新链路的数据底座先稳定，写路径可独立验证。
+
+验收：
+- 给定 commit 序列，边与 pending 状态与阈值规则一致；
+- 并发写入下无明显重复/丢失。
+
+### Phase 3：单条 Commit 自动触发 Route
+
+状态：已完成（单条 commit 达阈值后自动 route，终态清空 pending，异常不清空）。
+
+范围：
+- 在单条 commit 成功后检查 pending 阈值（默认 8）；
+- 达阈值则调用 `run_route_with_candidates(...)`（候选集为 `A + pending(A)`）；
+- route 终态（`update/create/support_insufficient`）清空触发节点 pending；
+- 异常时保留 pending 并记录审计/告警。
+
+目标：
+- 跑通“commit -> graph -> route -> evolve/create”的单条自动闭环。
+
+验收：
+- 单条 commit 触发链路可稳定完成；
+- 失败重试语义符合预期（异常不清空，成功清空）。
+
+### Phase 4：Batch Commit 统一触发（end_of_batch）
+
+状态：已完成（batch item 级触发关闭；改为 batch 结束后统一触发）。
+
+范围：
+- batch 内 item 仅负责建边与 pending 累积；
+- 全 batch 完成后统一扫描并触发 route（不在 item 级别触发）；
+- 增加批内去重与触发限流策略（避免同批抖动和风暴）。
+
+目标：
+- 满足“batch commit 完成后再统一 evolve/create”的业务约束。
+
+验收：
+- batch 场景 route 只在 end-of-batch 触发；
+- 同批多个锚点触发时顺序/并发可控，最终状态一致。
+
+### Phase 5：增强与评估（论文能力补齐）
+
+范围：
+- 引入 `error_only` / `combined` 分析器与多层 merge；
+- top-k skill 候选重排、阈值校准、prevalence bias 强化；
+- held-out 评估、回归集、回滚/降级策略完善。
+
+目标：
+- 从“可运行”提升到“高质量、可扩展、可评估”。
+
+验收：
+- 线下评估指标（成功率、退化率、膨胀控制）达标；
+- 线上稳定性与回归指标满足门槛。
+
+### 19.23.1 建议实施顺序
+
+1. 先完成 Phase 2（仅图状态层）；
+2. 再做 Phase 3（单条自动触发）；
+3. 再做 Phase 4（batch end-of-batch 统一触发）；
+4. 最后进入 Phase 5（质量增强）。
+
+说明：Phase 1~4 已落地，后续以 Phase 5 为主线推进质量增强与评估。
+

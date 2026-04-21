@@ -14,9 +14,12 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.pstats
+.tmp_profile_*
 
 /data
 /openclaw_message
+/tmp
 
 # AMC OpenClaw bridge (Node build/runtime artifacts)
 amc_bridge/node_modules/

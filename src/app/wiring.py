@@ -9,6 +9,7 @@ from api.routes.promote import router as promote_router
 from api.routes.replay import router as replay_router
 from api.routes.retrieve import router as retrieve_router
 from app.config import AppSettings, load_settings
+from app.intertrajectory import build_intertrajectory_linker, build_intertrajectory_trigger
 from app.orchestrators.commit_orchestrator import CommitOrchestrator
 from app.orchestrators.promote_orchestrator import PromoteOrchestrator
 from app.orchestrators.retrieve_orchestrator import RetrieveOrchestrator
@@ -33,8 +34,26 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     repo = LocalFSTrajectoryRepository(root=cfg.storage.localfs_root)
     audit = JsonlAuditLogger(file_path=cfg.storage.audit_file_path)
     graph_store = build_graph_store_writer(cfg)
-    vector_store = build_vector_store_adapter(cfg)
-    skill_vector_store = build_skill_vector_store_adapter(cfg)
+    vector_store = None
+    try:
+        vector_store = build_vector_store_adapter(cfg)
+    except Exception as exc:
+        print(f"[AMC] vector store disabled: {type(exc).__name__}: {exc}")
+    skill_vector_store = None
+    try:
+        skill_vector_store = build_skill_vector_store_adapter(cfg)
+    except Exception as exc:
+        print(f"[AMC] skill vector store disabled: {type(exc).__name__}: {exc}")
+    intertrajectory_linker = build_intertrajectory_linker(
+        settings=cfg,
+        repo=repo,
+        graph_store=graph_store,
+        vector_store=vector_store,
+    )
+    intertrajectory_trigger = build_intertrajectory_trigger(
+        settings=cfg,
+        graph_store=graph_store,
+    )
     vector_indexer = None
     if cfg.indexing_async_enabled and cfg.embedding_provider.lower() == "openai" and cfg.openai_api_key:
         if vector_store is not None and cfg.indexing_include_levels:
@@ -81,6 +100,9 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         audit=audit,
         graph_store=graph_store,
         vector_indexer=vector_indexer,
+        intertrajectory_linker=intertrajectory_linker,
+        intertrajectory_trigger=intertrajectory_trigger,
+        intertrajectory_batch_trigger_mode=cfg.intertrajectory_batch_trigger_mode,
         idempotency_enabled=cfg.commit.idempotency_enabled,
     )
     semantic_recall = None

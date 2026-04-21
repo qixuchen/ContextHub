@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from types import SimpleNamespace
 from typing import Any
 
 from app.config import load_settings
@@ -15,6 +16,7 @@ from core.retrieve.service import RetrieveService
 from core.retrieve.skill_retriever import SkillRetriever
 from core.skills.create.skill_creator import create_skill_from_trajectories
 from core.skills.evolve.trajectory_pool_builder import TrajectoryPoolBuilder
+from core.skills.evolve.types import TrajectoryContext
 from core.skills.routing.skill_router import SkillRouteDecision, SkillRouter
 from core.skills.skill_loader import load_skills
 from infra.storage.fs.trajectory_repo import LocalFSTrajectoryRepository
@@ -130,13 +132,100 @@ def _forced_decision(mode: str, pool_summary: str) -> SkillRouteDecision:
     )
 
 
-def run_route(
+def _bundle_to_context(bundle: dict[str, Any]) -> TrajectoryContext:
+    meta = bundle.get("meta") if isinstance(bundle.get("meta"), dict) else {}
+    trajectory = bundle.get("trajectory")
+    steps = trajectory if isinstance(trajectory, list) else []
+    return TrajectoryContext(
+        trajectory_id=_safe_text(meta.get("trajectory_id")),
+        task_id=_safe_text(meta.get("task_id")),
+        abstract=_safe_text(bundle.get("abstract")),
+        overview=_safe_text(bundle.get("overview")),
+        trajectory=steps,
+    )
+
+
+def _pool_task_description(anchor: TrajectoryContext, neighbors: list[TrajectoryContext]) -> str:
+    parts: list[str] = []
+    for value in [anchor.task_id, anchor.abstract, anchor.overview]:
+        text = _safe_text(value)
+        if text:
+            parts.append(text)
+    if not parts:
+        for item in neighbors:
+            text = _safe_text(item.task_id) or _safe_text(item.abstract) or _safe_text(item.overview)
+            if text:
+                parts.append(text)
+                break
+    return " | ".join(parts) or f"trajectory {anchor.trajectory_id}"
+
+
+def _build_pool_result_from_candidates(
     *,
+    repo: LocalFSTrajectoryRepository,
+    anchor_trajectory_id: str,
+    candidate_trajectory_ids: list[str],
+    candidate_trajectory_scores: dict[str, dict[str, Any]] | None,
+    include_anchor: bool,
+) -> tuple[Any, list[str]]:  # noqa: ANN401
+    warnings: list[str] = []
+    anchor_bundle = repo.load_trajectory(anchor_trajectory_id)
+    if not anchor_bundle:
+        raise FileNotFoundError(f"anchor trajectory not found: {anchor_trajectory_id}")
+    anchor = _bundle_to_context(anchor_bundle)
+
+    dedup_ids = list(dict.fromkeys([_safe_text(x) for x in candidate_trajectory_ids if _safe_text(x)]))
+    if anchor_trajectory_id not in dedup_ids:
+        dedup_ids.insert(0, anchor_trajectory_id)
+    if len(dedup_ids) < 2:
+        warnings.append("candidate trajectory list has no neighbors besides anchor")
+
+    neighbors: list[TrajectoryContext] = []
+    retrieved_ids: list[str] = []
+    retrieved_scores: list[dict[str, Any]] = []
+    score_map = candidate_trajectory_scores or {}
+    for tid in dedup_ids:
+        if tid == anchor_trajectory_id:
+            continue
+        bundle = repo.load_trajectory(tid)
+        if not bundle:
+            warnings.append(f"candidate trajectory skipped: replay not found for {tid}")
+            continue
+        neighbors.append(_bundle_to_context(bundle))
+        retrieved_ids.append(tid)
+        score_item = score_map.get(tid) or {}
+        retrieved_scores.append(
+            {
+                "trajectory_id": tid,
+                "total_score": score_item.get("total_score"),
+                "semantic_score": score_item.get("semantic_score"),
+                "graph_match_score": score_item.get("graph_match_score"),
+            }
+        )
+    pool = [anchor, *neighbors] if include_anchor else list(neighbors)
+    query_payload = {"task_description": _pool_task_description(anchor, neighbors)}
+    pool_result = SimpleNamespace(
+        anchor=anchor,
+        neighbors=neighbors,
+        pool=pool,
+        retrieved_trajectory_ids=retrieved_ids,
+        retrieved_trajectory_scores=retrieved_scores,
+        query_payload=query_payload,
+        warnings=warnings,
+    )
+    return pool_result, warnings
+
+
+def _run_route_from_pool(
+    *,
+    settings,  # noqa: ANN001
+    pool_result,  # noqa: ANN001
     anchor_trajectory_id: str,
     account_id: str,
     agent_id: str,
     top_k: int,
-    trajectory_min_score: float,
+    trajectory_min_score: float | None,
+    support: int,
     skill_top_k: int,
     include_anchor: bool,
     merge_batch_size: int,
@@ -145,26 +234,60 @@ def run_route(
     force_mode: str,
     dry_run: bool,
     config_path: str | None,
+    warnings: list[str],
+    pool_seconds: float,
 ) -> dict[str, Any]:
-    settings = load_settings(config_path=config_path)
     t0 = time.perf_counter()
-    warnings: list[str] = []
-
-    retrieve_service, retrieve_warn = _build_retrieve_service(settings)
-    warnings.extend(retrieve_warn)
-    repo = LocalFSTrajectoryRepository(root=settings.storage.localfs_root)
-    pool_builder = TrajectoryPoolBuilder(repo=repo, retrieve_service=retrieve_service)
-    t_pool0 = time.perf_counter()
-    pool_result = pool_builder.build_success_pool(
-        account_id=account_id,
-        agent_id=agent_id,
-        anchor_trajectory_id=anchor_trajectory_id,
-        top_k=max(1, int(top_k)),
-        trajectory_min_score=float(trajectory_min_score),
-        include_anchor=bool(include_anchor),
-    )
-    pool_seconds = time.perf_counter() - t_pool0
-    warnings.extend(pool_result.warnings or [])
+    required_support = max(1, int(support))
+    qualified_support_count = len(pool_result.retrieved_trajectory_scores)
+    support_satisfied = qualified_support_count >= required_support
+    if not support_satisfied:
+        warnings.append(
+            f"support insufficient: qualified trajectories={qualified_support_count} < required_support={required_support}"
+        )
+        total_seconds = time.perf_counter() - t0
+        return {
+            "status": "ok",
+            "phase": "A1",
+            "mode": "route",
+            "decision": {
+                "decision": "support_insufficient",
+                "confidence": 0.0,
+                "scope_match_level": "low",
+                "reasoning": "support below minimum; skip route and skill write",
+                "task_type_summary": _safe_text((pool_result.query_payload or {}).get("task_description")),
+                "suggested_skill_name": "",
+            },
+            "candidate_skill": None,
+            "updated_skill_name": None,
+            "created_skill_name": None,
+            "trajectory_pool": {
+                "anchor": pool_result.anchor.trajectory_id,
+                "neighbor_count": len(pool_result.neighbors),
+                "pool_count": len(pool_result.pool),
+                "trajectory_min_score": (
+                    float(trajectory_min_score) if trajectory_min_score is not None else None
+                ),
+                "retrieved_trajectory_ids": pool_result.retrieved_trajectory_ids,
+                "retrieved_trajectory_scores": pool_result.retrieved_trajectory_scores,
+                "qualified_support_count": qualified_support_count,
+                "required_support": required_support,
+                "support_satisfied": support_satisfied,
+            },
+            "branch_result": {
+                "status": "skipped",
+                "reason": "support_insufficient",
+                "qualified_support_count": qualified_support_count,
+                "required_support": required_support,
+            },
+            "embedding_refresh_summary": None,
+            "timing": {
+                "pool_seconds": round(pool_seconds, 3),
+                "route_seconds": 0.0,
+                "total_seconds": round(total_seconds, 3),
+            },
+            "warnings": warnings,
+        }
 
     skill_retriever, skill_warn = _build_skill_retriever(settings)
     warnings.extend(skill_warn)
@@ -216,13 +339,16 @@ def run_route(
             account_id=account_id,
             agent_id=agent_id,
             top_k=max(1, int(top_k)),
-            trajectory_min_score=float(trajectory_min_score),
+            trajectory_min_score=(
+                float(trajectory_min_score) if trajectory_min_score is not None else 0.0
+            ),
             include_anchor=bool(include_anchor),
             analyst_mode="success_only",
             merge_batch_size=max(1, int(merge_batch_size)),
             max_parallel_analysts=max(1, int(max_parallel_analysts)),
             dry_run=bool(dry_run),
             config_path=config_path,
+            pool_override=pool_result,
         )
         embedding_refresh_summary = branch_result.get("embedding_refresh_summary")
     else:
@@ -288,9 +414,14 @@ def run_route(
             "anchor": pool_result.anchor.trajectory_id,
             "neighbor_count": len(pool_result.neighbors),
             "pool_count": len(pool_result.pool),
-            "trajectory_min_score": float(trajectory_min_score),
+            "trajectory_min_score": (
+                float(trajectory_min_score) if trajectory_min_score is not None else None
+            ),
             "retrieved_trajectory_ids": pool_result.retrieved_trajectory_ids,
             "retrieved_trajectory_scores": pool_result.retrieved_trajectory_scores,
+            "qualified_support_count": qualified_support_count,
+            "required_support": required_support,
+            "support_satisfied": support_satisfied,
         },
         "branch_result": branch_result,
         "embedding_refresh_summary": embedding_refresh_summary,
@@ -301,6 +432,113 @@ def run_route(
         },
         "warnings": warnings,
     }
+
+
+def run_route(
+    *,
+    anchor_trajectory_id: str,
+    account_id: str,
+    agent_id: str,
+    top_k: int,
+    trajectory_min_score: float,
+    support: int,
+    skill_top_k: int,
+    include_anchor: bool,
+    merge_batch_size: int,
+    max_parallel_analysts: int,
+    confidence_threshold: float,
+    force_mode: str,
+    dry_run: bool,
+    config_path: str | None,
+) -> dict[str, Any]:
+    settings = load_settings(config_path=config_path)
+    warnings: list[str] = []
+
+    retrieve_service, retrieve_warn = _build_retrieve_service(settings)
+    warnings.extend(retrieve_warn)
+    repo = LocalFSTrajectoryRepository(root=settings.storage.localfs_root)
+    pool_builder = TrajectoryPoolBuilder(repo=repo, retrieve_service=retrieve_service)
+    t_pool0 = time.perf_counter()
+    pool_result = pool_builder.build_success_pool(
+        account_id=account_id,
+        agent_id=agent_id,
+        anchor_trajectory_id=anchor_trajectory_id,
+        top_k=max(1, int(top_k)),
+        trajectory_min_score=float(trajectory_min_score),
+        include_anchor=bool(include_anchor),
+    )
+    pool_seconds = time.perf_counter() - t_pool0
+    warnings.extend(pool_result.warnings or [])
+    return _run_route_from_pool(
+        settings=settings,
+        pool_result=pool_result,
+        anchor_trajectory_id=anchor_trajectory_id,
+        account_id=account_id,
+        agent_id=agent_id,
+        top_k=top_k,
+        trajectory_min_score=float(trajectory_min_score),
+        support=support,
+        skill_top_k=skill_top_k,
+        include_anchor=include_anchor,
+        merge_batch_size=merge_batch_size,
+        max_parallel_analysts=max_parallel_analysts,
+        confidence_threshold=confidence_threshold,
+        force_mode=force_mode,
+        dry_run=dry_run,
+        config_path=config_path,
+        warnings=warnings,
+        pool_seconds=pool_seconds,
+    )
+
+
+def run_route_with_candidates(
+    *,
+    anchor_trajectory_id: str,
+    candidate_trajectory_ids: list[str],
+    candidate_trajectory_scores: dict[str, dict[str, Any]] | None,
+    account_id: str,
+    agent_id: str,
+    support: int,
+    skill_top_k: int = 1,
+    include_anchor: bool = True,
+    merge_batch_size: int = 8,
+    max_parallel_analysts: int = 32,
+    confidence_threshold: float = 0.7,
+    force_mode: str = "auto",
+    dry_run: bool = False,
+    config_path: str | None = None,
+) -> dict[str, Any]:
+    settings = load_settings(config_path=config_path)
+    repo = LocalFSTrajectoryRepository(root=settings.storage.localfs_root)
+    t_pool0 = time.perf_counter()
+    pool_result, warnings = _build_pool_result_from_candidates(
+        repo=repo,
+        anchor_trajectory_id=anchor_trajectory_id,
+        candidate_trajectory_ids=candidate_trajectory_ids,
+        candidate_trajectory_scores=candidate_trajectory_scores,
+        include_anchor=bool(include_anchor),
+    )
+    pool_seconds = time.perf_counter() - t_pool0
+    return _run_route_from_pool(
+        settings=settings,
+        pool_result=pool_result,
+        anchor_trajectory_id=anchor_trajectory_id,
+        account_id=account_id,
+        agent_id=agent_id,
+        top_k=max(1, len(candidate_trajectory_ids)),
+        trajectory_min_score=None,
+        support=support,
+        skill_top_k=skill_top_k,
+        include_anchor=include_anchor,
+        merge_batch_size=merge_batch_size,
+        max_parallel_analysts=max_parallel_analysts,
+        confidence_threshold=confidence_threshold,
+        force_mode=force_mode,
+        dry_run=dry_run,
+        config_path=config_path,
+        warnings=warnings,
+        pool_seconds=pool_seconds,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -317,6 +555,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.7,
         help="Minimum total_score required to include a retrieved trajectory",
+    )
+    p.add_argument(
+        "--support",
+        type=int,
+        default=4,
+        help="Minimum number of trajectories passing threshold before route can update/create",
     )
     p.add_argument("--skill-top-k", type=int, default=1, help="Candidate skill top-k before routing")
     p.add_argument(
@@ -352,6 +596,7 @@ def main() -> int:
         agent_id=args.agent_id,
         top_k=int(args.top_k),
         trajectory_min_score=float(args.trajectory_min_score),
+        support=int(args.support),
         skill_top_k=int(args.skill_top_k),
         include_anchor=not bool(args.exclude_anchor),
         merge_batch_size=int(args.merge_batch_size),

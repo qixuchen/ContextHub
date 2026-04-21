@@ -120,6 +120,16 @@ skills:
     collection_name: "amc_skill_index"
     state_file: "./data/index/skill_embedding_state.json"
     max_workers: 4
+  intertrajectory:
+    enabled: true
+    backend: neo4j
+    edge_threshold: 0.7
+    trigger_threshold: 8
+    max_neighbors_per_commit: 32
+    edge_rel_type: "INTERTRAJ_SIMILAR"
+    pending_rel_type: "INTERTRAJ_ACTIVATED_PENDING"
+    async_trigger: true
+    batch_trigger_mode: "end_of_batch"
 
 # ---------------------------------------------------------------------------
 # 审计

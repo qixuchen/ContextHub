@@ -212,6 +212,20 @@ AMC_HOST=0.0.0.0 AMC_PORT=8000 AMC_RELOAD=1 bash scripts/start_amc.sh
 AMC_INSTALL_DEPS=0 bash scripts/start_amc.sh
 ```
 
+可选：若系统服务启动需要 `sudo` 且你希望无交互运行，可在 `.env` 增加：
+
+```bash
+AMC_SUDO_PASSWORD=<your-linux-sudo-password>
+```
+
+说明：`AMC_NEO4J_PASSWORD` 是 Neo4j 账号密码，不是 Linux `sudo` 密码。
+
+可选：若 Neo4j 启动较慢，可调大服务就绪等待时间（默认 90s）：
+
+```bash
+AMC_SERVICE_START_TIMEOUT_SEC=180 AMC_SERVICE_START_POLL_SEC=2 bash scripts/start_amc.sh
+```
+
 再分别测试 commit / promote / retrieve：
 
 ```bash
@@ -360,6 +374,33 @@ amc-commit-trajectory sample_traj/traj1.json \
   --owner-space agent-a \
   --visualize-graph-png \
   --pretty
+```
+
+如需查看 inter-trajectory 图（节点、相似边、每个节点 activate/pending 数量）：
+
+```bash
+amc-visualize-intertrajectory \
+  --account-id acc-demo \
+  --agent-id agent-a \
+  --scope agent \
+  --owner-space agent-a \
+  --node-limit 200 \
+  --edge-limit-per-node 64 \
+  --pretty
+```
+
+如需导出 PNG 图（便于直观看节点和边）：
+
+```bash
+amc-visualize-intertrajectory \
+  --account-id acc-demo \
+  --agent-id agent-a \
+  --scope agent \
+  --owner-space agent-a \
+  --node-limit 200 \
+  --edge-limit-per-node 64 \
+  --png-output ./tmp/intertrajectory.png \
+  --png-title "acc-demo / agent-a inter-trajectory"
 ```
 
 ## 依赖变更记录
