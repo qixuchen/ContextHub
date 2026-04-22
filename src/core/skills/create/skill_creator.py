@@ -6,8 +6,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
 from core.skills.evolve.types import TrajectoryContext
 
 
@@ -23,7 +21,7 @@ def slugify_skill_name(raw: str) -> str:
         return "skill_auto"
     if not text.startswith("skill_"):
         text = f"skill_{text}"
-    return text
+    return text[:48]
 
 
 def unique_skill_name(base_name: str, *, existing_names: set[str]) -> str:
@@ -45,7 +43,7 @@ def _infer_name_seed(task_type_summary: str, pool: list[TrajectoryContext]) -> s
     if pool and pool[0].task_id:
         return pool[0].task_id
     if pool and pool[0].abstract:
-        return pool[0].abstract
+        return pool[0].abstract[:40]
     return "auto"
 
 
@@ -53,9 +51,9 @@ def _build_description(task_type_summary: str) -> str:
     summary = _safe_text(task_type_summary) or "related tasks"
     return (
         "Auto-created from trajectory evidence. "
-        f"Focuses on: {summary}. "
+        f"Focuses on: {summary[:180]}. "
         "Use this skill when task type and tool pattern are highly aligned."
-    )
+    )[:320]
 
 
 def _build_skill_markdown(
@@ -65,24 +63,17 @@ def _build_skill_markdown(
     task_type_summary: str,
     pool: list[TrajectoryContext],
 ) -> str:
-    frontmatter = yaml.safe_dump(
-        {
-            "name": skill_name,
-            "description": description,
-        },
-        allow_unicode=True,
-        sort_keys=False,
-    ).strip()
     lines: list[str] = [
         "---",
-        frontmatter,
+        f"name: {skill_name}",
+        f"description: {description}",
         "---",
         "",
         f"# {skill_name}",
         "",
         "## Scope",
         "- This skill is created from recent successful trajectories.",
-        f"- Task type summary: {_safe_text(task_type_summary) or 'N/A'}",
+        f"- Task type summary: {(_safe_text(task_type_summary) or 'N/A')[:240]}",
         "",
         "## When to use",
         "- The current task shares similar intent, tool usage, and output shape with evidence trajectories.",
@@ -103,11 +94,11 @@ def _build_skill_markdown(
         "",
         "## Evidence Trajectories",
     ]
-    for item in pool:
+    for item in pool[:8]:
         tid = item.trajectory_id or "unknown"
         snippet = _safe_text(item.abstract) or _safe_text(item.overview)
         if snippet:
-            lines.append(f"- `{tid}`: {snippet}")
+            lines.append(f"- `{tid}`: {snippet[:200]}")
         else:
             lines.append(f"- `{tid}`")
     lines.append("")
@@ -128,10 +119,9 @@ def create_skill_from_trajectories(
     task_type_summary: str,
     pool: list[TrajectoryContext],
     existing_names: set[str],
-    name_seed: str | None = None,
     dry_run: bool = False,
 ) -> CreateSkillResult:
-    seed = _safe_text(name_seed) or _infer_name_seed(task_type_summary, pool)
+    seed = _infer_name_seed(task_type_summary, pool)
     skill_name = unique_skill_name(seed, existing_names=existing_names)
     description = _build_description(task_type_summary)
     root = Path(skill_root) / skill_name

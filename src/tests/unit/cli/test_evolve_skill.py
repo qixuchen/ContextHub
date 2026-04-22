@@ -16,7 +16,6 @@ def test_build_parser_defaults_for_phase_a() -> None:
     parser = build_parser()
     args = parser.parse_args(["--skill-name", "skill_a", "--anchor-trajectory-id", "traj-1"])
     assert args.top_k == 8
-    assert args.trajectory_min_score == 0.7
     assert args.merge_batch_size == 8
     assert args.analyst_mode == "success_only"
 
@@ -29,7 +28,6 @@ def test_run_evolve_rejects_non_success_mode() -> None:
             account_id="acc",
             agent_id="agent",
             top_k=8,
-            trajectory_min_score=0.7,
             include_anchor=True,
             analyst_mode="combined",
             merge_batch_size=8,
@@ -80,7 +78,6 @@ def test_run_evolve_dry_run_happy_path(monkeypatch, tmp_path: Path) -> None:
                 neighbors=[],
                 pool=[anchor],
                 retrieved_trajectory_ids=[],
-                retrieved_trajectory_scores=[],
                 warnings=[],
             )
 
@@ -138,7 +135,6 @@ def test_run_evolve_dry_run_happy_path(monkeypatch, tmp_path: Path) -> None:
         account_id="acc",
         agent_id="agent",
         top_k=8,
-            trajectory_min_score=0.7,
         include_anchor=True,
         analyst_mode="success_only",
         merge_batch_size=8,

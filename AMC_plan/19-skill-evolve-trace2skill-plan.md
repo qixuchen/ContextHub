@@ -408,27 +408,23 @@ Merge operator（合并器）：
 
 ---
 
-## 19.16 分阶段补充（在现有 A/B/C 上叠加）
+## 19.16 历史分阶段记录（A1/A2/B）与当前口径对齐
 
-### Phase A1（Route MVP）
-- `amc-route-skill` 可跑通；
-- skill top-1 + trajectory pool + LLM route；
-- commit 摘要 prompt 升级（overview 更细，支持步骤级工具/动作细节）；
-- trajectory pool 增加 `trajectory_min_score` 过滤（默认 0.6，且不回填低分）；
-- success analyst prompt 增加 “specificity > generality” 硬约束；
-- `update` 复用 evolve；
-- `create` 走模板创建；
-- 两分支都刷新 embedding。
+说明：本节的 A1/A2/B 是早期拆分方案，现已并入 `19.23` 的统一 Phase 1~5 主线；以下仅保留为历史映射，避免与当前实现口径冲突。
 
-### Phase A2（质量增强）
-- create 分支由 trajectory 自动归纳 description/scope；
-- route 决策审计（decision + evidence）；
-- slug 命名与冲突策略完善。
+### A1（Route MVP，已并入 Phase 1，且已完成）
+- `amc-route-skill` 主链路可跑通（skill top-1 + trajectory pool + LLM route + 程序 hard guard）；
+- commit 摘要 prompt 已升级为细粒度步骤级描述，并要求结合 query 做严格成败核验；
+- trajectory pool 已支持 `trajectory_min_score` 过滤（当前默认 0.7，且不回填低分）；
+- route 侧已支持 `support` 门禁（默认 4）；
+- `update` 复用 evolve，`create` 走模板创建，两分支都刷新 embedding。
 
-### Phase B（鲁棒性）
-- skill 候选从 top-1 扩展到 top-k 重排；
-- 置信度阈值校准；
-- route 回归测试集与自动评测。
+### A2（质量增强，部分能力已吸收，剩余并入 Phase 5）
+- route 决策审计与 create 命名/冲突处理的基础能力已具备；
+- 更完整的质量增强（如更强自动归纳、系统化校准）统一放在 Phase 5 持续推进。
+
+### B（鲁棒性，已并入 Phase 5）
+- top-k skill 候选重排、阈值校准、回归评测等均以 Phase 5 为唯一推进入口，不再单列旧 B 阶段。
 
 ---
 
@@ -455,7 +451,7 @@ Merge operator（合并器）：
 2. 新节点 `A` 入图后，和现有节点 `B` 计算融合分数（semantic + graph）；
 3. 若 `score >= intertraj_edge_threshold`（默认 0.7），则建立 `A <-> B` 无向边；
 4. 边建立后，`A` 与 `B` 互相加入对方 activate 列表（pending 累积）；
-5. 当某节点 `X` 的 activate 数达到阈值 `activate_trigger_threshold`（默认 8），触发一次 skill route：
+5. 当某节点 `X` 的 activate 数达到阈值 `activate_trigger_threshold`（默认 4），触发一次 skill route：
    - candidate trajectories = `X + activate(X)`；
    - 复用现有 route/update/create 逻辑；
    - route 结束后清空 `activate(X)`，重新累积。
@@ -465,8 +461,8 @@ Merge operator（合并器）：
 ### 19.18.1 与现有 Route 门禁的关系
 
 - 现有 route 门禁：`support`（默认 4）；
-- 新增 activate 触发门槛：`activate_trigger_threshold`（默认 8）；
-- 两者关系：先满足 activate 触发（>=8）才进入 route；进入 route 后仍保留 `support` 校验（双保险）。
+- 新增 activate 触发门槛：`activate_trigger_threshold`（默认 4）；
+- 两者关系：先满足 activate 触发（>=4）才进入 route；进入 route 后仍保留 `support` 校验（双保险）。
 
 ---
 
@@ -499,7 +495,7 @@ Merge operator（合并器）：
    - 若 `total_score >= intertraj_edge_threshold`（默认 0.7）则建边 `A<->B`；
    - 同时 `A.pending += B`，`B.pending += A`（去重）；
 4. 将 activate pending 写入 Neo4j（`A -> B` 与 `B -> A`）；
-5. 单条 commit 模式下，检查 `A.pending` 是否达到 `activate_trigger_threshold`（默认 8）；
+5. 单条 commit 模式下，检查 `A.pending` 是否达到 `activate_trigger_threshold`（默认 4）；
 6. 若达到阈值，触发 route 执行（candidate trajectories = `A + A.pending`）。
 
 备注：commit API 本身应保持低延迟，route 触发建议异步执行（后台 worker / 事件队列）。
@@ -545,7 +541,7 @@ Merge operator（合并器）：
 
 - `skills.intertrajectory.enabled: true`
 - `skills.intertrajectory.edge_threshold: 0.7`
-- `skills.intertrajectory.trigger_threshold: 8`
+- `skills.intertrajectory.trigger_threshold: 4`
 - `skills.intertrajectory.max_neighbors_per_commit: 32`（防止单次 commit 扫描过大）
 - `skills.intertrajectory.backend: neo4j`
 - `skills.intertrajectory.edge_rel_type: INTERTRAJ_SIMILAR`
@@ -587,7 +583,7 @@ Merge operator（合并器）：
 
 1. 新节点 `A` 与旧节点 `B` 分数>=0.7 时，建立无向边，且互相写入 pending activate；
 2. 分数<0.7 不建边，pending 不增加；
-3. 单条 commit 下，`pending(A)` 达到 8 时自动触发 route；
+3. 单条 commit 下，`pending(A)` 达到 4 时自动触发 route；
 4. batch commit 下，必须等整批 commit 完成后才统一触发 route；
 5. 自动触发 route 使用 `A + pending(A)` 作为候选集，不再做候选相似检索；
 6. route 完成后仅清空触发节点的 pending 列表；
@@ -638,7 +634,7 @@ Merge operator（合并器）：
 状态：已完成（单条 commit 达阈值后自动 route，终态清空 pending，异常不清空）。
 
 范围：
-- 在单条 commit 成功后检查 pending 阈值（默认 8）；
+- 在单条 commit 成功后检查 pending 阈值（默认 4）；
 - 达阈值则调用 `run_route_with_candidates(...)`（候选集为 `A + pending(A)`）；
 - route 终态（`update/create/support_insufficient`）清空触发节点 pending；
 - 异常时保留 pending 并记录审计/告警。
@@ -688,4 +684,18 @@ Merge operator（合并器）：
 4. 最后进入 Phase 5（质量增强）。
 
 说明：Phase 1~4 已落地，后续以 Phase 5 为主线推进质量增强与评估。
+
+---
+
+## 19.24 新增需求：Commit 总结阶段同步产出 trajectory 成败标签（success/fail）
+
+该需求属于 **commit 主链路能力**，规范以 `03-commit-pipeline.md` 为主（单一事实来源）：
+- 见 `03` 的 `(5.1)`：summary 同步产出 `trajectory_outcome`；
+- 见 `03` 的 `(6.0)`：`raw_graph.json` / `clean_graph.json` / `AMCTrajectory` 节点 outcome 落盘字段与 batch 共用口径。
+
+在 19 文档中的角色：
+- 只记录该能力对 skill 路由的影响，不重复定义 commit 细节，避免 03/19 双口径漂移；
+- route/evolve 可直接消费 `trajectory_outcome_label`（success/fail）作为后续策略信号（Phase 5 首批增强项）。
+
+实施优先级：高（为 route/evolve 提供显式 success/fail 监督信号）。
 

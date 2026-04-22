@@ -10,6 +10,7 @@ from typing import Any
 from openai import OpenAI
 
 from core.commit.llm_runtime import chat_completion_with_retry, provider_key
+from core.commit.summary_outcome import normalize_trajectory_outcome
 
 
 @dataclass
@@ -53,26 +54,62 @@ class LLMTrajectorySummarizer:
     @staticmethod
     def _summary_prompt() -> str:
         return (
-            "You summarize an agent trajectory into two Chinese summaries.\n"
-            "Return JSON only: {'l0': str, 'l1': str}.\n"
-            "Requirements:\n"
-            "- l0: 100-180 Chinese characters. Include task goal, core route, and final outcome.\n"
-            "- l1: 1200-1800 Chinese characters. Do NOT over-compress.\n"
-            "- l1 must explicitly state the task goal and completion status near the beginning.\n"
-            "- l1 must include concrete step-level details, not only high-level summary.\n"
-            "- For each key step, explicitly state: (a) what tool/action was used and the input, (b) what was done, (c) key observation/result.\n"
-            "- Include failure/retry/fix details when present, and explain the final successful path.\n"
-            "- Keep all facts grounded in the trajectory. Do not invent unseen details.\n"
-            "- Prefer a structured narrative (e.g., numbered key steps) to improve downstream skill extraction specificity."
+            "# ROLE\n"
+            "You are an expert AI agent evaluator and summarizer. Your task is to analyze an agent's execution trajectory, "
+            "evaluate its success strictly, and generate two Chinese summaries at different levels of detail.\n\n"
+            "# OUTPUT FORMAT\n"
+            "Return ONLY a valid JSON object. Do not include markdown code blocks (like ```json), greetings, or explanations "
+            "outside the JSON.\n"
+            "{\n"
+            '  "l0": "string (Chinese) - Concise executive summary",\n'
+            '  "l1": "string (Chinese) - Highly detailed step-by-step report",\n'
+            '  "trajectory_outcome": {\n'
+            '    "reason": "string (Chinese) - Step-by-step verification of sub-goals based on evidence",\n'
+            '    "confidence": float (0.0 to 1.0),\n'
+            '    "label": "success" | "fail"\n'
+            "  }\n"
+            "}\n\n"
+            "# SUMMARIZATION GUIDELINES (CHINESE OUTPUT REQUIRED)\n\n"
+            "## l0: Executive Summary\n"
+            "- Length: A concise paragraph (approx. 100-180 Chinese characters).\n"
+            "- Content: Must clearly state the original task goal, the core execution route taken, and the final outcome.\n\n"
+            "## l1: Detailed Execution Report\n"
+            "- Length: A highly detailed, comprehensive report (approx. 1200-1800 Chinese characters). Do NOT over-compress.\n"
+            "- Structure: Use a structured narrative (e.g., numbered lists for key steps) to improve downstream skill extraction specificity.\n"
+            "- Content Requirements:\n"
+            "  1. Opening: Explicitly state the task goal and completion status at the very beginning.\n"
+            "  2. Step-by-Step Details: For EVERY key step, explicitly state:\n"
+            "     - step-level details are mandatory; do not provide only high-level summary.\n"
+            "     (a) The tool/action used and its input.\n"
+            "     (b) What was done or attempted.\n"
+            "     (c) The key observation/result.\n"
+            "  3. Error Handling: Include details of any failures, retries, or fixes when present, and explain how the agent found the final successful path.\n"
+            "  4. Grounding: Keep all facts strictly grounded in the trajectory. Do NOT invent unseen details.\n\n"
+            "# EVALUATION GUIDELINES (trajectory_outcome)\n\n"
+            "- Be skeptical by default: Verify query completion with concrete evidence from trajectory steps/results, not assumptions.\n"
+            "- Decompose & Verify (in reason): Decompose the user query into required sub-goals/constraints. Check them one by one against the trajectory evidence.\n"
+            '- Strict Success: Return "success" ONLY when ALL required query sub-goals are clearly satisfied by evidence.\n'
+            '- Strict Failure: If evidence is incomplete/ambiguous, or you cannot confidently verify completion, return "fail". '
+            'Any partially completed task MUST be labeled "fail".'
         )
 
-    def summarize(self, steps: list[dict[str, Any]]) -> tuple[str, str]:
+    def summarize(
+        self,
+        steps: list[dict[str, Any]],
+        query: str | None = None,
+    ) -> tuple[str, str, dict[str, Any]]:
         self.last_traces = []
         prompt = self._summary_prompt()
         client = self._client()
         messages = [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": json.dumps({"trajectory": steps}, ensure_ascii=False)},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"query": str(query or ""), "trajectory": steps},
+                    ensure_ascii=False,
+                ),
+            },
         ]
         resp, retries = chat_completion_with_retry(
             client=client,
@@ -85,6 +122,7 @@ class LLMTrajectorySummarizer:
         data = self._extract_json(content)
         l0 = str(data.get("l0") or "").strip()
         l1 = str(data.get("l1") or "").strip()
+        trajectory_outcome = normalize_trajectory_outcome(data.get("trajectory_outcome"))
         usage = getattr(resp, "usage", None)
         prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
@@ -96,7 +134,11 @@ class LLMTrajectorySummarizer:
                 "base_url": self.base_url or "",
                 "temperature": self.temperature,
                 "raw_response_text": content,
-                "parsed_result": {"l0": l0, "l1": l1},
+                "parsed_result": {
+                    "l0": l0,
+                    "l1": l1,
+                    "trajectory_outcome": trajectory_outcome,
+                },
                 "error": "",
                 "retry_count": int(retries),
                 "prompt_tokens": prompt_tokens,
@@ -106,5 +148,5 @@ class LLMTrajectorySummarizer:
         )
         if not l0 or not l1:
             raise ValueError("llm summary output missing l0/l1")
-        return l0, l1
+        return l0, l1, trajectory_outcome
 

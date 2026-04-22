@@ -23,9 +23,9 @@ class _FakeRetrieveService:
             (),
             {
                 "items": [
-                    {"trajectory_id": "anchor", "total_score": 0.99, "semantic_score": 0.91, "graph_match_score": 0.9},
-                    {"trajectory_id": "n1", "total_score": 0.88, "semantic_score": 0.83, "graph_match_score": 0.7},
-                    {"trajectory_id": "n2", "total_score": 0.55, "semantic_score": 0.72, "graph_match_score": 0.5},
+                    {"trajectory_id": "anchor"},
+                    {"trajectory_id": "n1"},
+                    {"trajectory_id": "n2"},
                 ],
                 "warnings": ["w1"],
             },
@@ -55,16 +55,11 @@ def test_build_success_pool_includes_anchor_and_neighbors() -> None:
         agent_id="agent",
         anchor_trajectory_id="anchor",
         top_k=3,
-        trajectory_min_score=0.7,
         include_anchor=True,
     )
     assert out.anchor.trajectory_id == "anchor"
-    assert [x.trajectory_id for x in out.neighbors] == ["n1"]
-    assert [x.trajectory_id for x in out.pool] == ["anchor", "n1"]
-    assert out.retrieved_trajectory_scores == [
-        {"trajectory_id": "n1", "total_score": 0.88, "semantic_score": 0.83, "graph_match_score": 0.7},
-    ]
+    assert [x.trajectory_id for x in out.neighbors] == ["n1", "n2"]
+    assert [x.trajectory_id for x in out.pool] == ["anchor", "n1", "n2"]
     assert out.warnings and "w1" in out.warnings
-    assert any("skipped by threshold" in w for w in out.warnings)
     assert out.query_payload.get("task_description")
 

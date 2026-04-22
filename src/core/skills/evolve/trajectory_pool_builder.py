@@ -14,15 +14,6 @@ def _safe_text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _safe_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except Exception:
-        return None
-
-
 def _tool_name_from_action(action: str) -> str:
     raw = _safe_text(action)
     if not raw:
@@ -83,7 +74,6 @@ class TrajectoryPoolBuildResult:
     neighbors: list[TrajectoryContext]
     pool: list[TrajectoryContext]
     retrieved_trajectory_ids: list[str]
-    retrieved_trajectory_scores: list[dict[str, Any]]
     query_payload: dict[str, Any]
     warnings: list[str]
 
@@ -100,7 +90,6 @@ class TrajectoryPoolBuilder:
         agent_id: str,
         anchor_trajectory_id: str,
         top_k: int,
-        trajectory_min_score: float = 0.7,
         include_anchor: bool = True,
     ) -> TrajectoryPoolBuildResult:
         anchor_bundle = self.repo.load_trajectory(anchor_trajectory_id)
@@ -121,33 +110,12 @@ class TrajectoryPoolBuilder:
         warnings = list(retrieve_out.warnings or [])
 
         neighbor_ids: list[str] = []
-        neighbor_scores: list[dict[str, Any]] = []
         seen: set[str] = {anchor_trajectory_id}
-        threshold = float(trajectory_min_score)
         for item in retrieve_out.items:
             tid = _safe_text(item.get("trajectory_id"))
             if not tid or tid in seen:
                 continue
-            total_score = _safe_float(item.get("total_score"))
-            if total_score is None:
-                total_score = _safe_float(item.get("score"))
-            if total_score is None:
-                warnings.append(f"trajectory skipped: missing score for {tid}")
-                continue
-            if total_score < threshold:
-                warnings.append(
-                    f"trajectory skipped by threshold: {tid} total_score={total_score:.4f} < {threshold:.4f}"
-                )
-                continue
             neighbor_ids.append(tid)
-            neighbor_scores.append(
-                {
-                    "trajectory_id": tid,
-                    "total_score": total_score,
-                    "semantic_score": _safe_float(item.get("semantic_score")),
-                    "graph_match_score": _safe_float(item.get("graph_match_score")),
-                }
-            )
             seen.add(tid)
             if len(neighbor_ids) >= max(1, int(top_k)):
                 break
@@ -166,7 +134,6 @@ class TrajectoryPoolBuilder:
             neighbors=neighbors,
             pool=pool,
             retrieved_trajectory_ids=neighbor_ids,
-            retrieved_trajectory_scores=neighbor_scores,
             query_payload=query_payload,
             warnings=warnings,
         )
