@@ -28,6 +28,26 @@ def test_router_returns_create_when_no_candidate() -> None:
     out = router.decide(candidate_skill=None, pool=_pool())
     assert out.decision == "create"
     assert out.scope_match_level == "low"
+    assert "candidate_skill is None" in out.reasoning
+
+
+def test_router_hard_guard_forces_create_without_candidate_even_if_model_says_update() -> None:
+    router = SkillRouter(
+        model="dummy",
+        api_key="",
+        decision_fn=lambda c, scope, pool: {  # noqa: ARG005
+            "decision": "update",
+            "confidence": 0.99,
+            "scope_match_level": "high",
+            "reasoning": "forced by test",
+            "task_type_summary": "x",
+        },
+    )
+    out = router.decide(candidate_skill=None, pool=_pool())
+    assert out.decision == "create"
+    assert out.scope_match_level == "low"
+    assert out.confidence == 1.0
+    assert "candidate_skill is None" in out.reasoning
 
 
 def test_router_hard_guard_forces_create_when_scope_not_high() -> None:
@@ -118,4 +138,5 @@ def test_router_llm_prompt_contains_specificity_and_name_contract(monkeypatch) -
     system_prompt = captured["messages"][0]["content"]
     assert "specific, operational details" in system_prompt
     assert "suggested_skill_name" in system_prompt
+    assert "candidate_skill is null/None, MUST return create" in system_prompt
 

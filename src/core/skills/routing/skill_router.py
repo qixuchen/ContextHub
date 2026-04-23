@@ -162,6 +162,7 @@ class SkillRouter:
             "Given one candidate skill and a trajectory pool summary, decide UPDATE or CREATE.\n"
             "Hard rule:\n"
             "- Return update ONLY when the candidate skill scope is highly related to trajectory task type.\n"
+            "- If candidate_skill is null/None, MUST return create (never update without a candidate).\n"
             "- If relation is medium/low/uncertain, MUST return create.\n"
             "For task_type_summary, describe the concrete shared task solved by these trajectories.\n"
             "Prefer specific, operational details (goal, key objects/entities, mandatory tool/step sequence, success checks),\n"
@@ -221,8 +222,17 @@ class SkillRouter:
         if raw_decision not in {"update", "create"}:
             raw_decision = "create"
         if not has_candidate:
-            raw_decision = "create"
-            level = "low"
+            reason = decision.reasoning or ""
+            suffix = "hard-guard forced create: candidate_skill is None"
+            reason = f"{reason}; {suffix}" if reason else suffix
+            return SkillRouteDecision(
+                decision="create",
+                confidence=1.0,
+                scope_match_level="low",
+                reasoning=reason,
+                task_type_summary=decision.task_type_summary,
+                suggested_skill_name=decision.suggested_skill_name,
+            )
         if raw_decision == "update":
             if level != "high" or float(decision.confidence) < float(self.confidence_threshold):
                 reason = decision.reasoning or ""

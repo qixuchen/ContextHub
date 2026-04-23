@@ -13,6 +13,7 @@ class TrajectoryContext:
     abstract: str
     overview: str
     trajectory: list[dict[str, Any]]
+    outcome_label: str | None = None
 
 
 @dataclass

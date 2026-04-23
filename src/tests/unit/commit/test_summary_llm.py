@@ -30,9 +30,12 @@ def test_summarize_sends_detailed_prompt(monkeypatch) -> None:
 
     monkeypatch.setattr("core.commit.summary_llm.chat_completion_with_retry", _fake_chat_completion_with_retry)
     summarizer = LLMTrajectorySummarizer(api_key="dummy", model="dummy-model")
-    l0, l1 = summarizer.summarize([{"Step": 1, "meta": {"role": "AIMessage"}, "Action": "x()"}])
+    l0, l1, outcome = summarizer.summarize(
+        [{"Step": 1, "meta": {"role": "AIMessage"}, "Action": "x()"}]
+    )
     assert l0 == "a"
     assert l1 == "b"
+    assert outcome["label"] is None
     messages = captured["messages"]
     assert isinstance(messages, list) and messages
     system_prompt = str(messages[0]["content"])

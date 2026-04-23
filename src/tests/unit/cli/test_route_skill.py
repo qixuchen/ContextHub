@@ -57,6 +57,7 @@ def test_build_parser_defaults_for_route_phase_a1() -> None:
     assert args.support == 4
     assert args.skill_top_k == 1
     assert args.merge_batch_size == 8
+    assert args.analyst_mode == "combined"
     assert args.force_mode == "auto"
 
 
@@ -89,6 +90,10 @@ def test_run_route_auto_update_branch(monkeypatch) -> None:
             ]
 
     monkeypatch.setattr("cli.route_skill._build_skill_retriever", lambda settings: (_FakeSkillRetriever(), []))
+    monkeypatch.setattr(
+        "cli.route_skill.load_skills",
+        lambda root: ([SimpleNamespace(skill_name="skill_creator")], []),
+    )
 
     class _FakeRouter:
         def __init__(self, **kwargs):  # noqa: ANN001
@@ -135,6 +140,103 @@ def test_run_route_auto_update_branch(monkeypatch) -> None:
     assert out["created_skill_name"] is None
 
 
+def test_run_route_stale_candidate_is_cleaned_and_routed_to_create(monkeypatch) -> None:
+    monkeypatch.setattr("cli.route_skill.load_settings", lambda config_path=None: _fake_settings())
+    monkeypatch.setattr("cli.route_skill._build_retrieve_service", lambda settings: (object(), []))
+    monkeypatch.setattr("cli.route_skill.LocalFSTrajectoryRepository", lambda root: object())
+
+    class _FakePoolBuilder:
+        def __init__(self, repo, retrieve_service):  # noqa: ANN001
+            del repo, retrieve_service
+
+        def build_success_pool(self, **kwargs):  # noqa: ANN001
+            del kwargs
+            return _fake_pool_result()
+
+    monkeypatch.setattr("cli.route_skill.TrajectoryPoolBuilder", _FakePoolBuilder)
+
+    class _FakeSkillRetriever:
+        def recall(self, **kwargs):  # noqa: ANN001
+            del kwargs
+            return [
+                SkillHit(
+                    skill_name="skill_missing_from_fs",
+                    description="desc",
+                    uri="ctx://skills/skill_missing_from_fs",
+                    path="data/skill/skill_missing_from_fs",
+                    score=0.9,
+                )
+            ]
+
+    monkeypatch.setattr("cli.route_skill._build_skill_retriever", lambda settings: (_FakeSkillRetriever(), []))
+    monkeypatch.setattr("cli.route_skill.load_skills", lambda root: ([], []))
+
+    class _FakeRouter:
+        def __init__(self, **kwargs):  # noqa: ANN001
+            del kwargs
+
+        def summarize_task_type(self, pool):  # noqa: ANN001
+            return "summary"
+
+        def decide(self, *, candidate_skill, pool):  # noqa: ANN001
+            return SimpleNamespace(
+                decision="create" if candidate_skill is None else "update",
+                confidence=0.9,
+                scope_match_level="high",
+                reasoning="aligned",
+                task_type_summary="summary",
+                suggested_skill_name="suggested",
+            )
+
+    monkeypatch.setattr("cli.route_skill.SkillRouter", _FakeRouter)
+    evolve_calls: list[dict] = []
+
+    def _fake_run_evolve(**kwargs):  # noqa: ANN003
+        evolve_calls.append(kwargs)
+        return {
+            "status": "ok",
+            "mode": "create",
+            "skill_name": "skill_auto_test",
+            "embedding_refresh_summary": None,
+            "apply_summary": {
+                "skill_md_path": "data/skill/skill_auto_test/SKILL.md",
+                "created": False,
+                "description": "desc",
+            },
+        }
+
+    monkeypatch.setattr("cli.route_skill.run_evolve", _fake_run_evolve)
+
+    out = run_route(
+        anchor_trajectory_id="traj-anchor",
+        account_id="acc",
+        agent_id="agent",
+        top_k=8,
+        trajectory_min_score=0.7,
+        support=4,
+        skill_top_k=1,
+        include_anchor=True,
+        merge_batch_size=8,
+        max_parallel_analysts=4,
+        confidence_threshold=0.7,
+        force_mode="auto",
+        dry_run=True,
+        config_path=None,
+    )
+    assert out["decision"]["decision"] == "create"
+    assert out["candidate_skill"] is None
+    assert out["created_skill_name"] == "skill_auto_test"
+    assert out["updated_skill_name"] is None
+    assert out["branch_result"]["fallback_from_update"] is False
+    assert out["branch_result"]["mode"] == "create"
+    assert len(evolve_calls) == 1
+    assert evolve_calls[0]["mode"] == "create"
+    assert out["stale_skill_cleanup_summary"] is not None
+    assert out["stale_skill_cleanup_summary"]["skill_name"] == "skill_missing_from_fs"
+    assert out["stale_skill_cleanup_summary"]["dry_run"] is True
+    assert out["stale_skill_cleanup_summary"]["deleted_vectors"] == 0
+
+
 def test_run_route_auto_create_branch(monkeypatch) -> None:
     monkeypatch.setattr("cli.route_skill.load_settings", lambda config_path=None: _fake_settings())
     monkeypatch.setattr("cli.route_skill._build_retrieve_service", lambda settings: (object(), []))
@@ -170,15 +272,23 @@ def test_run_route_auto_create_branch(monkeypatch) -> None:
 
     monkeypatch.setattr("cli.route_skill.SkillRouter", _FakeRouter)
     monkeypatch.setattr("cli.route_skill.load_skills", lambda root: ([], []))
-    monkeypatch.setattr(
-        "cli.route_skill.create_skill_from_trajectories",
-        lambda **kwargs: SimpleNamespace(  # noqa: ARG005
-            skill_name="skill_auto_test",
-            skill_md_path="data/skill/skill_auto_test/SKILL.md",
-            created=False,
-            description="desc",
-        ),
-    )
+    evolve_calls: list[dict] = []
+
+    def _fake_run_evolve(**kwargs):  # noqa: ANN003
+        evolve_calls.append(kwargs)
+        return {
+            "status": "ok",
+            "mode": "create",
+            "skill_name": "skill_auto_test",
+            "embedding_refresh_summary": None,
+            "apply_summary": {
+                "skill_md_path": "data/skill/skill_auto_test/SKILL.md",
+                "created": False,
+                "description": "desc",
+            },
+        }
+
+    monkeypatch.setattr("cli.route_skill.run_evolve", _fake_run_evolve)
 
     out = run_route(
         anchor_trajectory_id="traj-anchor",
@@ -200,6 +310,8 @@ def test_run_route_auto_create_branch(monkeypatch) -> None:
     assert out["decision"]["suggested_skill_name"] == "spreadsheet_formula_repair"
     assert out["updated_skill_name"] is None
     assert out["created_skill_name"] == "skill_auto_test"
+    assert len(evolve_calls) == 1
+    assert evolve_calls[0]["mode"] == "create"
 
 
 def test_run_route_skips_when_support_insufficient(monkeypatch) -> None:
@@ -334,17 +446,18 @@ def test_run_route_create_branch_refreshes_embedding_when_not_dry_run(monkeypatc
     monkeypatch.setattr("cli.route_skill.SkillRouter", _FakeRouter)
     monkeypatch.setattr("cli.route_skill.load_skills", lambda root: ([], []))
     monkeypatch.setattr(
-        "cli.route_skill.create_skill_from_trajectories",
-        lambda **kwargs: SimpleNamespace(  # noqa: ARG005
-            skill_name="skill_auto_test",
-            skill_md_path="data/skill/skill_auto_test/SKILL.md",
-            created=True,
-            description="desc",
-        ),
-    )
-    monkeypatch.setattr(
-        "cli.route_skill._refresh_skill_embedding",
-        lambda **kwargs: {"refreshed": True},  # noqa: ARG005
+        "cli.route_skill.run_evolve",
+        lambda **kwargs: {  # noqa: ARG005
+            "status": "ok",
+            "mode": "create",
+            "skill_name": "skill_auto_test",
+            "embedding_refresh_summary": {"refreshed": True},
+            "apply_summary": {
+                "skill_md_path": "data/skill/skill_auto_test/SKILL.md",
+                "created": True,
+                "description": "desc",
+            },
+        },
     )
 
     out = run_route(
@@ -406,13 +519,18 @@ def test_run_route_with_candidates_uses_direct_pool(monkeypatch) -> None:
     monkeypatch.setattr("cli.route_skill.SkillRouter", _FakeRouter)
     monkeypatch.setattr("cli.route_skill.load_skills", lambda root: ([], []))
     monkeypatch.setattr(
-        "cli.route_skill.create_skill_from_trajectories",
-        lambda **kwargs: SimpleNamespace(  # noqa: ARG005
-            skill_name="skill_auto_test",
-            skill_md_path="data/skill/skill_auto_test/SKILL.md",
-            created=False,
-            description="desc",
-        ),
+        "cli.route_skill.run_evolve",
+        lambda **kwargs: {  # noqa: ARG005
+            "status": "ok",
+            "mode": "create",
+            "skill_name": "skill_auto_test",
+            "embedding_refresh_summary": None,
+            "apply_summary": {
+                "skill_md_path": "data/skill/skill_auto_test/SKILL.md",
+                "created": False,
+                "description": "desc",
+            },
+        },
     )
 
     out = run_route_with_candidates(

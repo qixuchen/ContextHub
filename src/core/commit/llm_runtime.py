@@ -76,6 +76,7 @@ def chat_completion_with_retry(
     max_retries: int | None = None,
     base_backoff_seconds: float | None = None,
     max_backoff_seconds: float | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> tuple[Any, int]:
     cfg = default_retry_config()
     concurrency = int(max_concurrency or cfg["max_concurrency"])
@@ -96,6 +97,7 @@ def chat_completion_with_retry(
                     model=model,
                     temperature=temperature,
                     messages=messages,
+                    response_format=response_format,
                 )
             return response, attempt
         except Exception as exc:

@@ -14,10 +14,14 @@ from cli.evolve_skill import run_evolve
 from core.retrieve.semantic_recall import SemanticRecall
 from core.retrieve.service import RetrieveService
 from core.retrieve.skill_retriever import SkillRetriever
-from core.skills.create.skill_creator import create_skill_from_trajectories
 from core.skills.evolve.trajectory_pool_builder import TrajectoryPoolBuilder
 from core.skills.evolve.types import TrajectoryContext
 from core.skills.routing.skill_router import SkillRouteDecision, SkillRouter
+from core.skills.skill_embedding_builder import (
+    load_skill_embedding_state,
+    save_skill_embedding_state,
+    skill_vector_id,
+)
 from core.skills.skill_loader import load_skills
 from infra.storage.fs.trajectory_repo import LocalFSTrajectoryRepository
 from infra.storage.graph.factory import build_graph_store_writer
@@ -112,6 +116,48 @@ def _refresh_skill_embedding(*, config_path: str | None, settings) -> dict[str, 
     return run_compute_skill_embedding(args)
 
 
+def _delete_stale_skill_embedding(
+    *,
+    settings,  # noqa: ANN001
+    skill_name: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    stale_name = _safe_text(skill_name)
+    if not stale_name:
+        return {"enabled": False, "reason": "empty_skill_name"}
+
+    summary: dict[str, Any] = {
+        "enabled": True,
+        "dry_run": bool(dry_run),
+        "skill_name": stale_name,
+        "vector_id": skill_vector_id(stale_name),
+        "deleted_vectors": 0,
+        "state_updated": False,
+        "errors": [],
+    }
+
+    if not dry_run:
+        try:
+            vector_store = build_skill_vector_store_adapter(settings)
+            if vector_store is None:
+                summary["errors"].append("skill vector backend unavailable")
+            else:
+                vector_store.delete_embeddings([summary["vector_id"]])
+                summary["deleted_vectors"] = 1
+        except Exception as exc:
+            summary["errors"].append(f"delete vector failed: {type(exc).__name__}: {exc}")
+
+        try:
+            state = load_skill_embedding_state(settings.skill_embedding_state_file)
+            if stale_name in state:
+                state.pop(stale_name, None)
+                save_skill_embedding_state(settings.skill_embedding_state_file, state)
+                summary["state_updated"] = True
+        except Exception as exc:
+            summary["errors"].append(f"update state failed: {type(exc).__name__}: {exc}")
+    return summary
+
+
 def _forced_decision(mode: str, pool_summary: str) -> SkillRouteDecision:
     if mode == "update":
         return SkillRouteDecision(
@@ -142,6 +188,7 @@ def _bundle_to_context(bundle: dict[str, Any]) -> TrajectoryContext:
         abstract=_safe_text(bundle.get("abstract")),
         overview=_safe_text(bundle.get("overview")),
         trajectory=steps,
+        outcome_label=_safe_text(meta.get("trajectory_outcome_label")) or None,
     )
 
 
@@ -231,6 +278,7 @@ def _run_route_from_pool(
     merge_batch_size: int,
     max_parallel_analysts: int,
     confidence_threshold: float,
+    analyst_mode: str,
     force_mode: str,
     dry_run: bool,
     config_path: str | None,
@@ -289,9 +337,14 @@ def _run_route_from_pool(
             "warnings": warnings,
         }
 
+    docs, loader_warnings = load_skills(root=settings.skill_root)
+    warnings.extend(loader_warnings)
+    existing_skill_names = {str(d.skill_name).strip() for d in docs if str(d.skill_name).strip()}
+
     skill_retriever, skill_warn = _build_skill_retriever(settings)
     warnings.extend(skill_warn)
     candidate_skill = None
+    stale_skill_cleanup_summary: dict[str, Any] | None = None
     if skill_retriever is not None:
         query_text = _build_skill_query_text(pool_result)
         hits = skill_retriever.recall(
@@ -301,6 +354,16 @@ def _run_route_from_pool(
         )
         if hits:
             candidate_skill = hits[0]
+            if _safe_text(candidate_skill.skill_name) not in existing_skill_names:
+                warnings.append(
+                    f"candidate skill not found under skill_root: {_safe_text(candidate_skill.skill_name)}"
+                )
+                stale_skill_cleanup_summary = _delete_stale_skill_embedding(
+                    settings=settings,
+                    skill_name=_safe_text(candidate_skill.skill_name),
+                    dry_run=bool(dry_run),
+                )
+                candidate_skill = None
 
     router = SkillRouter(
         model=settings.llm_model,
@@ -343,7 +406,8 @@ def _run_route_from_pool(
                 float(trajectory_min_score) if trajectory_min_score is not None else 0.0
             ),
             include_anchor=bool(include_anchor),
-            analyst_mode="success_only",
+            mode="update",
+            analyst_mode=str(analyst_mode),
             merge_batch_size=max(1, int(merge_batch_size)),
             max_parallel_analysts=max(1, int(max_parallel_analysts)),
             dry_run=bool(dry_run),
@@ -351,38 +415,36 @@ def _run_route_from_pool(
             pool_override=pool_result,
         )
         embedding_refresh_summary = branch_result.get("embedding_refresh_summary")
-    else:
+
+    if branch != "update" or candidate_skill is None:
         branch = "create"
-        docs, _ = load_skills(root=settings.skill_root)
-        existing_names = {str(d.skill_name).strip() for d in docs if str(d.skill_name).strip()}
         t_create0 = time.perf_counter()
-        create_result = create_skill_from_trajectories(
-            skill_root=settings.skill_root,
-            task_type_summary=decision.task_type_summary,
-            pool=pool_result.pool,
-            existing_names=existing_names,
-            name_seed=decision.suggested_skill_name,
+        branch_result = run_evolve(
+            skill_name=(_safe_text(decision.suggested_skill_name) or None),
+            anchor_trajectory_id=anchor_trajectory_id,
+            account_id=account_id,
+            agent_id=agent_id,
+            top_k=max(1, int(top_k)),
+            trajectory_min_score=(
+                float(trajectory_min_score) if trajectory_min_score is not None else 0.0
+            ),
+            include_anchor=bool(include_anchor),
+            mode="create",
+            analyst_mode=str(analyst_mode),
+            merge_batch_size=max(1, int(merge_batch_size)),
+            max_parallel_analysts=max(1, int(max_parallel_analysts)),
             dry_run=bool(dry_run),
+            config_path=config_path,
+            pool_override=pool_result,
         )
         create_seconds = time.perf_counter() - t_create0
-        created_skill_name = create_result.skill_name
-        if not dry_run:
-            embedding_refresh_summary = _refresh_skill_embedding(config_path=config_path, settings=settings)
-        branch_result = {
-            "status": "ok",
-            "phase": "A1-create",
-            "mode": "create",
-            "dry_run": bool(dry_run),
-            "skill_name": create_result.skill_name,
-            "apply_summary": {
-                "skill_md_path": create_result.skill_md_path,
-                "created": bool(create_result.created),
-                "description": create_result.description,
-            },
-            "timing": {
-                "create_seconds": round(create_seconds, 3),
-            },
-        }
+        created_skill_name = _safe_text(branch_result.get("skill_name")) or None
+        embedding_refresh_summary = branch_result.get("embedding_refresh_summary")
+        branch_timing = branch_result.get("timing")
+        if isinstance(branch_timing, dict):
+            branch_timing["route_create_seconds"] = round(create_seconds, 3)
+        branch_result["fallback_from_update"] = False
+        branch_result["stale_skill_cleanup_summary"] = stale_skill_cleanup_summary
 
     total_seconds = time.perf_counter() - t0
     return {
@@ -424,6 +486,7 @@ def _run_route_from_pool(
             "support_satisfied": support_satisfied,
         },
         "branch_result": branch_result,
+        "stale_skill_cleanup_summary": stale_skill_cleanup_summary,
         "embedding_refresh_summary": embedding_refresh_summary,
         "timing": {
             "pool_seconds": round(pool_seconds, 3),
@@ -447,9 +510,10 @@ def run_route(
     merge_batch_size: int,
     max_parallel_analysts: int,
     confidence_threshold: float,
-    force_mode: str,
-    dry_run: bool,
-    config_path: str | None,
+    analyst_mode: str = "combined",
+    force_mode: str = "auto",
+    dry_run: bool = False,
+    config_path: str | None = None,
 ) -> dict[str, Any]:
     settings = load_settings(config_path=config_path)
     warnings: list[str] = []
@@ -483,6 +547,7 @@ def run_route(
         merge_batch_size=merge_batch_size,
         max_parallel_analysts=max_parallel_analysts,
         confidence_threshold=confidence_threshold,
+        analyst_mode=analyst_mode,
         force_mode=force_mode,
         dry_run=dry_run,
         config_path=config_path,
@@ -504,6 +569,7 @@ def run_route_with_candidates(
     merge_batch_size: int = 8,
     max_parallel_analysts: int = 32,
     confidence_threshold: float = 0.7,
+    analyst_mode: str = "combined",
     force_mode: str = "auto",
     dry_run: bool = False,
     config_path: str | None = None,
@@ -533,6 +599,7 @@ def run_route_with_candidates(
         merge_batch_size=merge_batch_size,
         max_parallel_analysts=max_parallel_analysts,
         confidence_threshold=confidence_threshold,
+        analyst_mode=analyst_mode,
         force_mode=force_mode,
         dry_run=dry_run,
         config_path=config_path,
@@ -571,6 +638,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge-batch-size", type=int, default=8, help="Merge batch size for update branch")
     p.add_argument("--max-parallel-analysts", type=int, default=32, help="Parallel workers for update branch")
     p.add_argument(
+        "--analyst-mode",
+        choices=["success_only", "error_only", "combined"],
+        default="combined",
+        help="Analyst mode used by update branch",
+    )
+    p.add_argument(
         "--confidence-threshold",
         type=float,
         default=0.7,
@@ -602,6 +675,7 @@ def main() -> int:
         merge_batch_size=int(args.merge_batch_size),
         max_parallel_analysts=int(args.max_parallel_analysts),
         confidence_threshold=float(args.confidence_threshold),
+        analyst_mode=args.analyst_mode,
         force_mode=args.force_mode,
         dry_run=bool(args.dry_run),
         config_path=args.config_path,

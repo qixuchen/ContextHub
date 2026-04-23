@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 from core.skills.evolve.types import TrajectoryContext
 
 
@@ -63,10 +65,14 @@ def _build_skill_markdown(
     task_type_summary: str,
     pool: list[TrajectoryContext],
 ) -> str:
+    frontmatter = yaml.safe_dump(
+        {"name": skill_name, "description": description},
+        allow_unicode=True,
+        sort_keys=False,
+    ).strip()
     lines: list[str] = [
         "---",
-        f"name: {skill_name}",
-        f"description: {description}",
+        frontmatter,
         "---",
         "",
         f"# {skill_name}",
@@ -119,9 +125,10 @@ def create_skill_from_trajectories(
     task_type_summary: str,
     pool: list[TrajectoryContext],
     existing_names: set[str],
+    name_seed: str | None = None,
     dry_run: bool = False,
 ) -> CreateSkillResult:
-    seed = _infer_name_seed(task_type_summary, pool)
+    seed = _safe_text(name_seed) or _infer_name_seed(task_type_summary, pool)
     skill_name = unique_skill_name(seed, existing_names=existing_names)
     description = _build_description(task_type_summary)
     root = Path(skill_root) / skill_name
