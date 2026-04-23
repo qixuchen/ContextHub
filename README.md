@@ -1,40 +1,37 @@
-# ContextHub — AMC（Agent Memory Core）
+# ContextHub AMC
 
-轨迹记忆子系统：commit（解析轨迹 → raw/clean 图 → 持久化）与 retrieve（语义 + 图相似 + 融合）。  
-设计文档见目录 `AMC_plan/`。
+AMC (Agent Memory Core) is the memory subsystem in ContextHub.
+It stores agent trajectories and makes them reusable through retrieval and skill evolution.
 
-## 配置
+## What This Repo Does
 
-| 路径 | 说明 |
-|------|------|
-| `config/config.yaml` | 非敏感参数（默认 AMC 配置） |
-| `.env.example` | 环境变量模板 |
-| `.env` | 本地填写密钥；**已 `.gitignore`，勿提交** |
+Core capabilities:
 
-合并优先级与字段说明见 `AMC_plan/12-configuration-spec.md`。
+- **Commit**: ingest a trajectory, build raw/clean dependency graphs, generate summaries, and persist artifacts.
+- **Retrieve**: recall relevant trajectories via vector similarity and optional graph matching.
+- **Skill system**: retrieve skills, route create/update decisions, and evolve `SKILL.md`.
+- **Inter-trajectory trigger**: link related trajectories and auto-trigger skill route when thresholds are met.
+- **Promote**: promote agent-scope trajectories to team scope for sharing.
 
-## 环境
+Main docs live in `AMC_plan/`:
 
-- Python **≥ 3.11**
-- 推荐使用虚拟环境（示例使用项目内 `.venv`）
+- `AMC_plan/00-index.md` (reading order)
+- `AMC_plan/02-architecture.md` (runtime architecture)
+- `AMC_plan/04-commit-pipeline.md`
+- `AMC_plan/05-retrieve-pipeline.md`
+- `AMC_plan/06-skill-evolve-trace2skill-plan.md`
 
-## 基础服务依赖（pgvector + Neo4j）
+## Setup Guide
 
-AMC 的 commit/retrieve 集成测试与本地完整链路依赖以下服务：
+### 1) Prerequisites
 
-- PostgreSQL（启用 `pgvector` 扩展）
-- Neo4j（图存储）
+- Python **3.11+**
+- PostgreSQL with `pgvector` extension
+- Neo4j
 
-说明（重要）：
-- 若 PostgreSQL 未启动，`pgvector` 向量检索/索引会被自动禁用；
-- 若 Neo4j 未启动，图存储与图召回分支会被自动禁用；
-- 要验证完整链路（commit + retrieve + graph/vector），这两个服务都必须处于运行状态。
+> Full chain testing requires both PostgreSQL and Neo4j running.
 
-参考：
-- [How to install PostgreSQL with pgvector on Ubuntu - Rocketeers](https://rocketee.rs/install-postgresql-pgvector-ubuntu)
-- [How to install Neo4j on Ubuntu Server - TechRepublic](https://www.techrepublic.com/article/how-to-install-neo4j-ubuntu-server/)
-
-### Ubuntu 安装 PostgreSQL + pgvector
+#### 1.1 Install PostgreSQL + pgvector (Ubuntu)
 
 ```bash
 sudo apt install -y postgresql-common
@@ -44,7 +41,7 @@ sudo systemctl enable postgresql
 sudo systemctl start postgresql
 ```
 
-启用扩展（以 `postgres` 用户执行）：
+Enable extension in your DB:
 
 ```bash
 sudo -u postgres psql
@@ -52,27 +49,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 \q
 ```
 
-可选：创建 AMC 专用库与用户（示例）：
-
-```bash
-sudo -u postgres psql
-CREATE USER amc_user WITH PASSWORD 'amc_password';
-CREATE DATABASE amc_db OWNER amc_user;
-\c amc_db
-CREATE EXTENSION IF NOT EXISTS vector;
-GRANT ALL PRIVILEGES ON DATABASE amc_db TO amc_user;
-\q
-```
-
-连通性验证：
-
-```bash
-psql "postgresql://amc_user:amc_password@127.0.0.1:5432/amc_db" -c "SELECT extname FROM pg_extension WHERE extname='vector';"
-```
-
-### Ubuntu 安装 Neo4j
-
-安装并启动（APT 方式）：
+#### 1.2 Install Neo4j (Ubuntu)
 
 ```bash
 sudo apt update
@@ -81,333 +58,118 @@ sudo systemctl enable neo4j
 sudo systemctl start neo4j
 ```
 
-确认服务状态：
+Check status:
 
 ```bash
 sudo systemctl status neo4j
 ```
 
-首次安装后请按 Neo4j 提示完成初始密码设置，然后更新 `.env` 中 `AMC_NEO4J_*` 配置。
+### 2) Configure Environment
 
-### 与 AMC 配置对齐
+Create `.env` from `.env.example`, then fill at least:
 
-在 `.env`（或 `config/config.yaml`）中至少配置：
+- `AMC_OPENAI_API_KEY`
+- `AMC_PGVECTOR_DSN`
+- `AMC_NEO4J_URI`
+- `AMC_NEO4J_USER`
+- `AMC_NEO4J_PASSWORD`
 
-```bash
-AMC_VECTOR_STORE_BACKEND=pgvector
-AMC_PGVECTOR_DSN=postgresql://amc_user:amc_password@127.0.0.1:5432/amc_db
-AMC_PGVECTOR_SCHEMA=public
-AMC_PGVECTOR_TABLE=amc_embeddings
+Non-secret defaults are in `config/config.yaml`.
+Config reference: `AMC_plan/11-configuration-spec.md`.
 
-AMC_GRAPH_STORE_BACKEND=neo4j
-AMC_NEO4J_URI=bolt://127.0.0.1:7687
-AMC_NEO4J_USER=neo4j
-AMC_NEO4J_PASSWORD=your_password
-AMC_NEO4J_DATABASE=neo4j
-```
+### 3) Install Dependencies
 
-### 手动服务控制（可选，排障用）
-
-推荐（systemd）：
+Using `uv` (recommended):
 
 ```bash
-sudo systemctl start postgresql
-sudo systemctl start neo4j
-sudo systemctl status postgresql
-sudo systemctl status neo4j
+uv sync --extra dev
 ```
 
-兼容（service 命令）：
-
-```bash
-sudo service postgresql start
-sudo service neo4j start
-sudo service postgresql status
-sudo service neo4j status
-```
-
-端口自检（应为 `True`）：
-
-```bash
-python - <<'PY'
-import socket
-for p in (5432, 7687):
-    s = socket.socket(); s.settimeout(0.8)
-    ok = False
-    try:
-        s.connect(("127.0.0.1", p))
-        ok = True
-    except Exception:
-        ok = False
-    finally:
-        s.close()
-    print(p, ok)
-PY
-```
-
-## 一键安装依赖
-
-**依赖清单以根目录 `pyproject.toml` 为准**（运行时 + 可选开发组 `[dev]`）。
-
-### 使用 uv（推荐，可锁版本）
-
-```bash
-uv sync                    # 安装运行时依赖 + 可编辑包
-uv sync --extra dev        # 含 pytest / ruff / mypy 等
-# 若仓库中已有 uv.lock，uv sync 会按锁文件解析
-```
-
-本地更新锁文件（新增/升级依赖后执行）：
-
-```bash
-uv lock
-```
-
-### 使用 pip
+Or using `pip`:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -U pip
-pip install -e ".[dev]"     # 可编辑安装 + 开发依赖
+pip install -e ".[dev]"
 ```
 
-安装后可在 Python 中导入顶层包：`api`、`core`、`domain`、`infra`、`app`（源码位于 `src/`）。
+### 4) Start AMC
 
-## 测试
-
-```bash
-pytest src/tests -m "not integration"   # 单元测试（默认 CI）
-pytest src/tests -m integration          # 集成测试（需 Neo4j 等，部分用例仍为占位 skip）
-```
-
-### FastAPI 功能脚本（拆分版）
-
-统一使用一个命令启动整套服务（PostgreSQL + Neo4j + AMC API）：
+Recommended one-command startup:
 
 ```bash
 bash scripts/start_amc.sh
 ```
 
-该脚本会先检查并启动：
-- PostgreSQL（5432）
-- Neo4j（7687）
+This script:
 
-并自动执行 Python 环境准备：
-- 自动创建/激活 `.venv`（若不存在）；
-- 自动执行 `pip install -U pip`；
-- 若检测到依赖缺失，自动执行 `pip install -e ".[dev]"`。
+- ensures `.venv` exists
+- installs dependencies when needed
+- starts PostgreSQL and Neo4j if needed
+- runs API server (`main:app` from `src/`)
 
-然后再启动 AMC API（`uvicorn main:app --app-dir src ...`）。
+API default:
 
-可选：通过环境变量调整监听地址/端口（仍由同一脚本启动）：
+- Base: `http://127.0.0.1:8000/api/v1/amc`
+- Health: `http://127.0.0.1:8000/healthz`
 
-```bash
-AMC_HOST=0.0.0.0 AMC_PORT=8000 AMC_RELOAD=1 bash scripts/start_amc.sh
-```
+## Quick Verification
 
-可选：若你明确不希望脚本触发 pip 安装（例如 CI 或离线环境），可设置：
-
-```bash
-AMC_INSTALL_DEPS=0 bash scripts/start_amc.sh
-```
-
-可选：若系统服务启动需要 `sudo` 且你希望无交互运行，可在 `.env` 增加：
-
-```bash
-AMC_SUDO_PASSWORD=<your-linux-sudo-password>
-```
-
-说明：`AMC_NEO4J_PASSWORD` 是 Neo4j 账号密码，不是 Linux `sudo` 密码。
-
-可选：若 Neo4j 启动较慢，可调大服务就绪等待时间（默认 90s）：
-
-```bash
-AMC_SERVICE_START_TIMEOUT_SEC=180 AMC_SERVICE_START_POLL_SEC=2 bash scripts/start_amc.sh
-```
-
-再分别测试 commit / promote / retrieve：
+In another terminal:
 
 ```bash
 python scripts/test_commit_api.py --pretty
-python scripts/test_promote_api.py --trajectory-id <committed_trajectory_id> --pretty
 python scripts/test_retrieve_api.py --pretty
+python scripts/test_promote_api.py --trajectory-id <trajectory_id> --pretty
 ```
 
-`commit` 脚本（默认超时 600s）示例：
+## Useful CLI Commands
+
+Direct CLI commit (without HTTP):
 
 ```bash
-python scripts/test_commit_api.py \
-  --base-url "http://127.0.0.1:8000/api/v1/amc" \
-  --health-url "http://127.0.0.1:8000/healthz" \
-  --account-id acc-demo \
-  --agent-id agent-a \
-  --trajectory-file sample_traj/traj5.json \
-  --commit-timeout 600 \
-  --pretty
+amc-commit-trajectory sample_traj/traj1.json --account-id acc-demo --agent-id agent-a --scope agent --owner-space agent-a --pretty
 ```
 
-`retrieve` 脚本（默认超时 600s）示例：
+Batch commit:
 
 ```bash
-python scripts/test_retrieve_api.py \
-  --base-url "http://127.0.0.1:8000/api/v1/amc" \
-  --health-url "http://127.0.0.1:8000/healthz" \
-  --account-id acc-demo \
-  --agent-id agent-a \
-  --partial-trajectory-file sample_graph_query/pq04_pending_output_traj5.json \
-  --task-description "中小微 企业信贷及经营数据" \
-  --tool-whitelist local_db_sql \
-  --retrieve-timeout 600 \
-  --top-k 5 \
-  --pretty
+amc-commit-trajectory-batch --account-id acc-demo --agent-id agent-a --scope agent --owner-space agent-a --pretty
 ```
 
-`promote` 脚本示例：
+Inter-trajectory graph visualization:
 
 ```bash
-python scripts/test_promote_api.py \
-  --base-url "http://127.0.0.1:8000/api/v1/amc" \
-  --health-url "http://127.0.0.1:8000/healthz" \
-  --account-id acc-demo \
-  --agent-id agent-a \
-  --trajectory-id traj_xxx \
-  --target-team engineering \
-  --reason "promote reusable workflow for cross-agent demo" \
-  --pretty
+amc-visualize-intertrajectory --account-id acc-demo --agent-id agent-a --scope agent --owner-space agent-a --pretty
 ```
 
-### Demo 串联：commit -> promote -> retrieve
-
-可用如下顺序验证“一个 agent 存并晋升，另一个 agent 复用检索”：
+Skill utilities:
 
 ```bash
-# 1) agent-a 提交轨迹
-python scripts/test_commit_api.py \
-  --account-id acc-demo \
-  --agent-id agent-a \
-  --trajectory-file sample_traj/traj1.json \
-  --task-id task-funnel-v1 \
-  --pretty
-
-# 2) 把上一步返回的 trajectory_id 晋升到 team 空间
-python scripts/test_promote_api.py \
-  --account-id acc-demo \
-  --agent-id agent-a \
-  --trajectory-id traj_xxx \
-  --target-team engineering \
-  --pretty
-
-# 3) agent-b 在相似任务下检索（team 作用域）
-python scripts/test_retrieve_api.py \
-  --account-id acc-demo \
-  --agent-id agent-b \
-  --task-description "funnel diagnosis and strategy planning for growth campaign" \
-  --top-k 5 \
-  --pretty
+amc-compute-skill-embedding
+amc-route-skill --help
+amc-evolve-skill --help
 ```
 
-Phase 1 用例说明见 `AMC_plan/13-phase1-test-design.md`。
-运行与部署方式见 `docs/run-and-test.md`。
-AMC v0 作为 OpenClaw context engine 的接入步骤见 `docs/amc-openclaw-integration-guide.md`。
+## Reset AMC Storage
 
-补充说明：
-- `--account-id` 是当前主参数；
-- 账号上下文统一使用 `account_id`（或 `X-Account-Id` 请求头）。
-- 检索默认先做语义召回（L0/L1）；当提供 `partial_trajectory` 且图后端可用时，会追加图相似召回并做融合打分；不可用时自动回退语义召回并在 warnings 标注原因。
+Use reset script when you want a clean local state.
 
-## 命令行提交轨迹（无 HTTP）
+Dry run (preview only):
 
 ```bash
-amc-commit-trajectory sample_traj/traj1.json \
-  --account-id acc-demo \
-  --agent-id agent-a \
-  --scope agent \
-  --owner-space agent-a \
-  --pretty
+python scripts/reset_amc_storage.py --dry-run --pretty
 ```
 
-该命令会直接运行 Phase 1 commit pipeline，并输出 L0/L1 与图文件落盘位置。
-如需一键批量提交，新增命令 `amc-commit-trajectory-batch`（默认提交 Alfworld 0001-0008）：
+Reset trajectory content + trajectory vector index + Neo4j:
 
 ```bash
-amc-commit-trajectory-batch \
-  --account-id acc-demo \
-  --agent-id agent-a \
-  --scope agent \
-  --owner-space agent-a \
-  --pretty
+python scripts/reset_amc_storage.py --yes --pretty
 ```
 
-默认输出为精简模式（每条轨迹仅显示 `status` 与 `extraction_success`，并给出 `load/prepare/persist/total` 阶段耗时）。
-如需旧版完整明细（`neo4j_summary/vector_index_summary/storage` 等），可增加：
+Also clear skill embedding index:
 
 ```bash
-amc-commit-trajectory-batch --output-mode full --pretty
+python scripts/reset_amc_storage.py --yes --include-skill-embedding --pretty
 ```
-
-默认输入是：
-- `sample_traj/alfworld/data/traj_alfworld_0001.json`
-- ...
-- `sample_traj/alfworld/data/traj_alfworld_0008.json`
-
-也可显式传入文件列表覆盖默认输入：
-
-```bash
-amc-commit-trajectory-batch sample_traj/traj1.json sample_traj/traj2.json --pretty
-```
-
-批量命令可用主要参数：
-- `--fail-fast`：首条失败后跳过剩余；
-- `--llm-batch-size-hint / --llm-max-items-per-batch`：LLM 并行/分批提示；
-- `--llm-token-usage-ratio`：token 预算比例；
-- `--llm-max-context-tokens-fallback`：模型上下文回退上限；
-- `--labels-json '{"source":"cli-batch"}'`：附加到每条 item 的 labels。
-
-如需在同目录生成 `raw_graph.png` 和 `clean_graph.png`，可增加参数：
-
-```bash
-amc-commit-trajectory sample_traj/traj1.json \
-  --account-id acc-demo \
-  --agent-id agent-a \
-  --scope agent \
-  --owner-space agent-a \
-  --visualize-graph-png \
-  --pretty
-```
-
-如需查看 inter-trajectory 图（节点、相似边、每个节点 activate/pending 数量）：
-
-```bash
-amc-visualize-intertrajectory \
-  --account-id acc-demo \
-  --agent-id agent-a \
-  --scope agent \
-  --owner-space agent-a \
-  --node-limit 200 \
-  --edge-limit-per-node 64 \
-  --pretty
-```
-
-如需导出 PNG 图（便于直观看节点和边）：
-
-```bash
-amc-visualize-intertrajectory \
-  --account-id acc-demo \
-  --agent-id agent-a \
-  --scope agent \
-  --owner-space agent-a \
-  --node-limit 200 \
-  --edge-limit-per-node 64 \
-  --png-output ./tmp/intertrajectory.png \
-  --png-title "acc-demo / agent-a inter-trajectory"
-```
-
-## 依赖变更记录
-
-| 日期 | 变更 |
-|------|------|
-| 初始 | 见 `pyproject.toml` 中 `project.dependencies` 与 `optional-dependencies.dev` |
-| 2026-03 | README 补充 PostgreSQL/pgvector 与 Neo4j 的 Ubuntu 安装说明 |
-
-后续在 `pyproject.toml` 中增加或升级依赖后，请在本表追加一行，并执行 `uv lock`（若使用 uv）。
