@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.config import load_settings
+from app.intertrajectory import build_intertrajectory_linker, build_intertrajectory_trigger
 from app.orchestrators.commit_orchestrator import CommitOrchestrator, PreparedCommitOutcome
 from core.commit.batch_planner import plan_prepare_micro_batches
 from core.commit.dataflow_llm import LLMDataflowExtractor
@@ -65,13 +66,17 @@ def _build_runtime(*, config_path: str | None, disable_idempotency: bool) -> _Ru
     repo = LocalFSTrajectoryRepository(root=settings.storage.localfs_root)
     audit = JsonlAuditLogger(file_path=settings.storage.audit_file_path)
     graph_store = build_graph_store_writer(settings)
+    vector_store = None
+    try:
+        vector_store = build_vector_store_adapter(settings)
+    except Exception as exc:
+        print(f"[AMC] vector store disabled for commit batch runtime: {type(exc).__name__}: {exc}")
     vector_indexer = None
     if (
         settings.indexing_async_enabled
         and settings.embedding_provider.lower() == "openai"
         and settings.openai_api_key
     ):
-        vector_store = build_vector_store_adapter(settings)
         if vector_store is not None and settings.indexing_include_levels:
             vector_indexer = TrajectoryVectorIndexer(
                 vector_store=vector_store,
@@ -81,6 +86,16 @@ def _build_runtime(*, config_path: str | None, disable_idempotency: bool) -> _Ru
                 embedding_mode=settings.embedding_mode,
                 include_levels=tuple(int(x) for x in settings.indexing_include_levels),
             )
+    intertrajectory_linker = build_intertrajectory_linker(
+        settings=settings,
+        repo=repo,
+        graph_store=graph_store,
+        vector_store=vector_store,
+    )
+    intertrajectory_trigger = build_intertrajectory_trigger(
+        settings=settings,
+        graph_store=graph_store,
+    )
 
     extractor_obj: LLMDataflowExtractor | None = None
     summarizer_obj: LLMTrajectorySummarizer | None = None
@@ -120,6 +135,9 @@ def _build_runtime(*, config_path: str | None, disable_idempotency: bool) -> _Ru
         audit=audit,
         graph_store=graph_store,
         vector_indexer=vector_indexer,
+        intertrajectory_linker=intertrajectory_linker,
+        intertrajectory_trigger=intertrajectory_trigger,
+        intertrajectory_batch_trigger_mode=settings.intertrajectory_batch_trigger_mode,
         idempotency_enabled=idempotency_enabled,
     )
     return _RuntimeBundle(
@@ -203,6 +221,10 @@ def _result_item(
             "warnings": list(result.warnings),
             "neo4j_summary": dict(result.payload.get("neo4j_summary") or {}),
             "vector_index_summary": dict(result.payload.get("vector_index_summary") or {}),
+            "intertrajectory_summary": dict(result.payload.get("intertrajectory_summary") or {}),
+            "intertrajectory_trigger_summary": dict(
+                result.payload.get("intertrajectory_trigger_summary") or {}
+            ),
             "storage": _storage_paths(orchestrator, result.trajectory_id),
         }
     )
@@ -258,6 +280,7 @@ def run_commit_batch(
     runtime = _build_runtime(config_path=config_path, disable_idempotency=disable_idempotency)
     orchestrator = runtime.orchestrator
     resolved_account_id = str(account_id or "account-local").strip()
+    resolved_owner_space = str(owner_space or (agent_id if scope == "agent" else "")).strip()
 
     commands: list[CommitCommand] = []
     source_by_idx: dict[int, str] = {}
@@ -284,6 +307,7 @@ def run_commit_batch(
 
     batch_id = f"cli_batch_{uuid4().hex[:12]}"
     items: list[dict[str, Any]] = []
+    accepted_trajectory_ids: list[str] = []
     prepare_seconds = 0.0
     persist_seconds = 0.0
     if fail_fast:
@@ -344,6 +368,8 @@ def run_commit_batch(
                         output_mode=output_mode,
                     )
                 )
+                if str(result.status).strip().lower() == "accepted":
+                    accepted_trajectory_ids.append(str(result.trajectory_id))
             except Exception as exc:  # pragma: no cover - defensive guard
                 items.append(
                     _failed_item(
@@ -431,6 +457,8 @@ def run_commit_batch(
                         output_mode=output_mode,
                     )
                 )
+                if str(result.status).strip().lower() == "accepted":
+                    accepted_trajectory_ids.append(str(result.trajectory_id))
             except Exception as exc:  # pragma: no cover - defensive guard
                 items.append(
                     _failed_item(
@@ -448,6 +476,23 @@ def run_commit_batch(
     skipped = sum(1 for x in items if x.get("status") == "skipped")
     batch_status = "accepted" if failed == 0 and skipped == 0 else "accepted_partial"
     extraction_success_count = sum(1 for x in items if x.get("extraction_success") is True)
+    batch_trigger_summary: dict[str, Any] = {"enabled": False}
+    trigger_fn = getattr(orchestrator, "trigger_intertrajectory_batch", None)
+    if callable(trigger_fn):
+        try:
+            batch_trigger_summary = trigger_fn(
+                account_id=resolved_account_id,
+                agent_id=agent_id,
+                scope=scope,
+                owner_space=resolved_owner_space,
+                trajectory_ids=accepted_trajectory_ids,
+            )
+        except Exception as exc:
+            batch_trigger_summary = {
+                "enabled": True,
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
     total_seconds = time.perf_counter() - t0
     result = {
         "batch_id": batch_id,
@@ -467,11 +512,16 @@ def run_commit_batch(
             "persist_seconds": round(persist_seconds, 3),
             "total_seconds": round(total_seconds, 3),
         },
+        "intertrajectory_batch_trigger_summary": batch_trigger_summary,
         "resolved_inputs": [str(p) for p in resolved_paths],
     }
     if output_mode != "full":
         # Compact output only keeps essential success/error signal per trajectory.
         result.pop("resolved_inputs", None)
+        trigger_compact = dict(result.get("intertrajectory_batch_trigger_summary") or {})
+        if isinstance(trigger_compact.get("items"), list):
+            trigger_compact.pop("items", None)
+            result["intertrajectory_batch_trigger_summary"] = trigger_compact
     return result
 
 
@@ -513,7 +563,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fail-fast", action="store_true", help="Stop processing remaining items on first failure.")
     parser.add_argument("--llm-batch-size-hint", type=int, default=8)
     parser.add_argument("--llm-max-items-per-batch", type=int, default=16)
-    parser.add_argument("--llm-token-usage-ratio", type=float, default=0.6)
+    parser.add_argument("--llm-token-usage-ratio", type=float, default=0.8)
     parser.add_argument("--llm-max-context-tokens-fallback", type=int, default=24000)
     parser.add_argument("--visualize-graph-png", action="store_true")
     parser.add_argument(

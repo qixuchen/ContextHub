@@ -1,57 +1,69 @@
-# 01 — AMC 的目标、边界与设计原则
+# 01 — AMC 当前范围、边界与原则
 
-## 1.1 背景与目标
+本文档只保留**当前仓库已实现行为**，用于统一团队对 AMC 职责边界的理解。
 
-ContextHub 接收上层 Agent 的执行轨迹（trajectory），需要将“任务如何被完成”的过程沉淀为可复用资产。AMC 的目标是：
+## 1.1 AMC 当前职责
 
-1. 以**计算图**表达轨迹（动作为节点、依赖为边）；
-2. 在新任务中，基于**语义相似 + 轨迹相似**召回高价值历史轨迹；
-3. 为后续“通用工作流抽象”提供高质量原始素材。
+### 1.1.1 Commit
 
-术语说明：
-- `trajectory`：上层 Agent 一次任务执行产生的步骤序列；
-- `partial trajectory`：任务中途已执行片段（用于检索增强）；
-- `evidence`：命中结果的可解释证据（节点/子图/命中理由）。
+- 输入：上层传入的 trajectory 步骤序列。
+- 处理：步骤配对、raw/clean 图构建、L0/L1 摘要、可选 LLM 依赖提取。
+- 输出：
+  - 本地轨迹包（`trajectory.json`、`raw_graph.json`、`clean_graph.json`、`meta.json`、摘要等）
+  - 可选 Neo4j clean 图写入
+  - 可选 pgvector 索引写入
 
-## 1.2 AMC 核心职责
+### 1.1.2 Retrieve
 
-### (a) Commit
-- 接收轨迹（完整轨迹或增量片段）；
-- 标准化 Action / Action_result / Thinking / Response；
-- 抽取动作输入输出依赖，构建 DAG/近 DAG 计算图；
-- 将 raw/clean 计算图写入图后端（如 Neo4j）；
-- 在文件系统仅写入 trajectory-level 元信息（graph pointer、L0/L1 摘要）；
-- 记录来源、权限域、质量初值与审计信息。
+- 输入：`task_description` + 可选 `partial_trajectory` + 上下文（`account_id/agent_id`）。
+- 处理：
+  - 语义召回（必选路径）
+  - 图召回（当 `partial_trajectory` 与 clean graph loader 可用时）
+  - 融合排序 + 可见性过滤
+- 输出：
+  - trajectory 命中项（分数、证据、摘要）
+  - 可选 skill 命中项
 
-### (b) Retrieve
-- 接收查询（任务描述 + 可选 partial trajectory）；
-- 语义召回历史轨迹集合；
-- 图相似召回结构相近轨迹集合；
-- 融合排序并返回“可执行片段 + 证据”。
+### 1.1.3 Skill Route / Evolve
 
-## 1.3 非目标（当前阶段）
+- `route`：判定 `update/create` 并执行分支。
+- `evolve`：统一执行 skill 内容生成（结构化输出）与 `SKILL.md` 渲染。
+- 已接入 commit 驱动的 inter-trajectory 自动触发。
 
-- 不做全自动任务执行编排（AMC 只提供记忆，不调度执行）；
-- 不在 MVP 阶段做端到端“自动修复失败 SQL”；
-- 不在 MVP 阶段做复杂图神经网络在线训练；
-- 不在 MVP 阶段支持跨租户共享（默认严格隔离）。
+### 1.1.4 Replay / Promote
 
-## 1.4 设计原则
+- `replay`：按 `trajectory_id` 回放已存轨迹包内容。
+- `promote`：将 agent 私有轨迹提升到 team scope，并刷新向量索引。
 
-1. **结构先于语义**：先保证轨迹结构可解释，再做语义优化；
-2. **低侵入集成**：上层 Agent 无需改造大量逻辑，仅新增 commit/retrieve 调用；
-3. **默认可审计**：每次 commit/retrieve 都可追溯“谁在何时看到了什么”；
-4. **账户优先隔离**：所有索引与检索默认 account-bound（`account_id`）；
-5. **增量可演进**：从规则依赖抽取起步，逐步升级到模型辅助抽取；
-6. **可回放与可复现**：返回结果必须携带 trajectory_id、step_range、edge 证据。
-7. **图存储后端化**：节点与边不落文件系统，文件系统只存 trajectory-level 入口信息。
+## 1.2 当前边界（做什么 / 不做什么）
 
-## 1.5 与 ContextHub 主系统边界
+### 做什么
 
-- **ContextHub 上层**：负责接收请求、业务编排、调用 AMC 接口；
-- **AMC**：负责轨迹建模、索引、召回、反馈回写；
-- **AMC 文件系统落点**：`accounts/{account_id}/scope/{scope}/{owner_space}/memories/trajectories/...`；
-- **共享能力**：认证鉴权、ACL、审计、变更传播、生命周期策略。
+- 提供轨迹记忆核心链路：commit、retrieve、replay、promote、skill route/evolve。
+- 维护跨轨迹激活关系并支持阈值触发 route。
+- 将关键操作写入 JSONL 审计日志。
 
-即：AMC 是 Memory Service 的“轨迹子域内核”，而不是独立平台。
+### 不做什么（当前实现中未覆盖）
+
+- 不做执行编排与任务调度（AMC 仅负责记忆与检索）。
+- 不提供完整 ACL 策略引擎（`infra/security/acl_engine.py` 仍是占位）。
+- 不提供跨租户组织级复杂授权模型（当前以 account context + scope 规则为主）。
+
+## 1.3 当前隔离口径（实现事实）
+
+- API 强制 `X-Account-Id`（commit/retrieve/promote）。
+- `scope/owner_space` 在 commit 入参层校验：
+  - `scope=agent` 时 `owner_space` 必须等于 agent；
+  - 其他 scope 必须显式提供 `owner_space`。
+- retrieve 侧目前使用内置可见性规则（非完整 ACL）：
+  - `agent/user` 仅 owner 可见
+  - `team/datalake` 当前按 account 内共享处理
+
+## 1.4 设计原则（保留）
+
+1. **实现优先可观测**：每条主链路要有可调试输出与审计记录。  
+2. **结构化优先**：关键模型（轨迹图、skill 文档）优先结构化，再渲染文本。  
+3. **低耦合集成**：对上层 Agent 保持 API 边界清晰。  
+4. **默认 account 隔离**：跨 account 访问默认不允许。  
+5. **文档随代码演进**：plan 以“当前行为”描述为主，不保留过期方案。
 

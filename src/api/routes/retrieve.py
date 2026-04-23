@@ -52,4 +52,9 @@ def retrieve(
         raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"retrieve failed: {type(e).__name__}") from e
-    return RetrieveResponse(items=result.items, warnings=[*result.warnings, *deprecation_warnings])
+    return RetrieveResponse(
+        items=result.items,
+        skills=list(result.skills or []),
+        skill_retrieval_summary=dict(result.skill_retrieval_summary or {}),
+        warnings=[*result.warnings, *deprecation_warnings],
+    )

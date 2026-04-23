@@ -1,5 +1,5 @@
 # AMC 默认配置（非密钥）。敏感项见仓库根目录 `.env` / `.env.example`。
-# 规范说明：AMC_plan/12-configuration-spec.md
+# 规范说明：AMC_plan/11-configuration-spec.md
 # 合并优先级：进程环境变量 > .env > 本文件 > 代码默认值
 
 # ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ model_endpoints:
   llm_model: "gpt-4.1-mini"    # 统一 LLM 模型名（当前 dataflow 也复用这个）
 
 # ---------------------------------------------------------------------------
-# 安全（与 AMC_plan/05 对齐）
+# 安全（与 AMC_plan/07 对齐）
 # ---------------------------------------------------------------------------
 security:
   acl:
@@ -69,7 +69,7 @@ indexing:
   include_levels: [0, 1]
 
 # ---------------------------------------------------------------------------
-# Commit（AMC_plan/03）
+# Commit（AMC_plan/04）
 # ---------------------------------------------------------------------------
 commit:
   idempotency:
@@ -87,13 +87,17 @@ commit:
     enabled: true
 
 # ---------------------------------------------------------------------------
-# Retrieve（AMC_plan/04）
+# Retrieve（AMC_plan/05）
 # ---------------------------------------------------------------------------
 retrieve:
   top_k_default: 5
   top_k_max: 20
   semantic_top_n: 50
   graph_top_n: 50
+  skills:
+    enabled: true
+    top_k: 3
+    score_threshold: 0.2
   rerank:
     with_partial:
       w_sem: 0.45
@@ -104,6 +108,28 @@ retrieve:
       w_fb: 0.10
   stale:
     exclude_by_default: true
+
+# ---------------------------------------------------------------------------
+# Skills（离线 embedding 构建 + 在线检索）
+# ---------------------------------------------------------------------------
+skills:
+  root: "./data/skill"
+  embedding:
+    enabled: true
+    index_table: "amc_skill_index"
+    collection_name: "amc_skill_index"
+    state_file: "./data/index/skill_embedding_state.json"
+    max_workers: 4
+  intertrajectory:
+    enabled: true
+    backend: neo4j
+    edge_threshold: 0.7
+    trigger_threshold: 8
+    max_neighbors_per_commit: 32
+    edge_rel_type: "INTERTRAJ_SIMILAR"
+    pending_rel_type: "INTERTRAJ_ACTIVATED_PENDING"
+    async_trigger: true
+    batch_trigger_mode: "end_of_batch"
 
 # ---------------------------------------------------------------------------
 # 审计

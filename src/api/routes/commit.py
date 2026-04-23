@@ -157,6 +157,7 @@ def commit_trajectory_batch(
     batch_id = (body.batch_id or "").strip() or f"batch_{uuid4().hex[:12]}"
     fail_fast = bool(body.options.fail_fast)
     item_results: list[BatchCommitItemResponse] = []
+    accepted_trajectory_ids: list[str] = []
     commands = [
         CommitCommand(
             agent_id=resolved_agent_id,
@@ -189,7 +190,8 @@ def commit_trajectory_batch(
                 )
                 continue
             try:
-                result = orchestrator.commit(command)
+                prepared = orchestrator.prepare_commit(command)
+                result = orchestrator.commit_prepared(command, prepared)
                 item_results.append(
                     BatchCommitItemResponse(
                         item_id=item_id,
@@ -203,6 +205,8 @@ def commit_trajectory_batch(
                         vector_index_summary=dict(result.payload.get("vector_index_summary") or {}),
                     )
                 )
+                if str(result.status).strip().lower() == "accepted":
+                    accepted_trajectory_ids.append(str(result.trajectory_id))
             except TrajectoryValidationError as exc:
                 item_results.append(
                     BatchCommitItemResponse(
@@ -302,6 +306,8 @@ def commit_trajectory_batch(
                         vector_index_summary=dict(result.payload.get("vector_index_summary") or {}),
                     )
                 )
+                if str(result.status).strip().lower() == "accepted":
+                    accepted_trajectory_ids.append(str(result.trajectory_id))
             except Exception as exc:  # pragma: no cover - defensive guard
                 item_results.append(
                     BatchCommitItemResponse(
@@ -311,6 +317,22 @@ def commit_trajectory_batch(
                         error_message=f"{type(exc).__name__}: {exc}",
                     )
                 )
+
+    batch_trigger_summary: dict[str, Any] = {"enabled": False}
+    try:
+        batch_trigger_summary = orchestrator.trigger_intertrajectory_batch(
+            account_id=resolved_account_id,
+            agent_id=resolved_agent_id,
+            scope=scope,
+            owner_space=owner_space,
+            trajectory_ids=accepted_trajectory_ids,
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        batch_trigger_summary = {
+            "enabled": True,
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
     accepted = sum(1 for x in item_results if x.status == "accepted")
     idempotent = sum(1 for x in item_results if x.status == "idempotent")
@@ -330,4 +352,5 @@ def commit_trajectory_batch(
         summary=summary,
         items=item_results,
         warnings=list(deprecation_warnings),
+        intertrajectory_batch_trigger_summary=batch_trigger_summary,
     )

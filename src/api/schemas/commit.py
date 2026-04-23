@@ -42,7 +42,7 @@ class BatchCommitOptions(BaseModel):
     fail_fast: bool = False
     llm_batch_size_hint: int = 8
     llm_max_items_per_batch: int = 16
-    llm_token_usage_ratio: float = 0.6
+    llm_token_usage_ratio: float = 0.8
     llm_max_context_tokens_fallback: int = 24000
     persist_batch_size: int = 32
 
@@ -96,6 +96,7 @@ class BatchCommitResponse(BaseModel):
     summary: BatchCommitSummary
     items: list[BatchCommitItemResponse] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    intertrajectory_batch_trigger_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReplayResponse(BaseModel):

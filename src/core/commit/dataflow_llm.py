@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +22,7 @@ class LLMDataflowExtractor:
     base_url: str | None = None
     temperature: float = 0.0
     _thread_local: threading.local = field(default_factory=threading.local, init=False, repr=False)
+    _trace_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     @property
     def last_traces(self) -> list[dict[str, Any]]:
@@ -68,24 +70,27 @@ class LLMDataflowExtractor:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         total_tokens: int = 0,
+        trace_sink: list[dict[str, Any]] | None = None,
     ) -> None:
-        self.last_traces.append(
-            {
-                "call_type": call_type,
-                "model": self.model,
-                "base_url": self.base_url or "",
-                "temperature": self.temperature,
-                "threshold": threshold,
-                "top_k_per_dst": top_k_per_dst,
-                "raw_response_text": raw_response_text,
-                "parsed_result": parsed_result,
-                "error": error or "",
-                "retry_count": int(retry_count),
-                "prompt_tokens": int(prompt_tokens),
-                "completion_tokens": int(completion_tokens),
-                "total_tokens": int(total_tokens),
-            }
-        )
+        target = trace_sink if trace_sink is not None else self.last_traces
+        with self._trace_lock:
+            target.append(
+                {
+                    "call_type": call_type,
+                    "model": self.model,
+                    "base_url": self.base_url or "",
+                    "temperature": self.temperature,
+                    "threshold": threshold,
+                    "top_k_per_dst": top_k_per_dst,
+                    "raw_response_text": raw_response_text,
+                    "parsed_result": parsed_result,
+                    "error": error or "",
+                    "retry_count": int(retry_count),
+                    "prompt_tokens": int(prompt_tokens),
+                    "completion_tokens": int(completion_tokens),
+                    "total_tokens": int(total_tokens),
+                }
+            )
 
     def _extract_dataflow(
         self,
@@ -93,6 +98,7 @@ class LLMDataflowExtractor:
         nodes: list[dict[str, Any]],
         threshold: float,
         top_k_per_dst: int,
+        trace_sink: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         prompt = (
             "You are extracting dataflow dependencies between action nodes.\n"
@@ -142,6 +148,7 @@ class LLMDataflowExtractor:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
+                trace_sink=trace_sink,
             )
             return edges
         dataflow_raw = data.get("dataflow_edges")
@@ -156,6 +163,7 @@ class LLMDataflowExtractor:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
+            trace_sink=trace_sink,
         )
         return edges
 
@@ -165,6 +173,7 @@ class LLMDataflowExtractor:
         nodes: list[dict[str, Any]],
         threshold: float,
         top_k_per_dst: int,
+        trace_sink: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         prompt = (
             "You are extracting reasoning dependencies between action nodes.\n"
@@ -209,6 +218,7 @@ class LLMDataflowExtractor:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
+            trace_sink=trace_sink,
         )
         return edges
 
@@ -225,34 +235,50 @@ class LLMDataflowExtractor:
         - dataflow extraction
         - reasoning extraction
         """
-        self.clear_traces()
+        trace_sink: list[dict[str, Any]] = []
         dataflow_edges: list[dict[str, Any]] = []
         reasoning_edges: list[dict[str, Any]] = []
-        try:
-            dataflow_edges = self._extract_dataflow(
-                nodes=nodes, threshold=threshold, top_k_per_dst=top_k_per_dst
-            )
-        except Exception as exc:
-            self._record_trace(
-                call_type="dataflow",
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_dataflow = pool.submit(
+                self._extract_dataflow,
+                nodes=nodes,
                 threshold=threshold,
                 top_k_per_dst=top_k_per_dst,
-                raw_response_text="",
-                parsed_result={},
-                error=f"{type(exc).__name__}: {exc}",
+                trace_sink=trace_sink,
             )
-        try:
-            reasoning_edges = self._extract_reasoning(
-                nodes=nodes, threshold=reasoning_threshold, top_k_per_dst=top_k_per_dst
-            )
-        except Exception as exc:
-            self._record_trace(
-                call_type="reasoning",
+            fut_reasoning = pool.submit(
+                self._extract_reasoning,
+                nodes=nodes,
                 threshold=reasoning_threshold,
                 top_k_per_dst=top_k_per_dst,
-                raw_response_text="",
-                parsed_result={},
-                error=f"{type(exc).__name__}: {exc}",
+                trace_sink=trace_sink,
             )
+            try:
+                dataflow_edges = fut_dataflow.result()
+            except Exception as exc:
+                self._record_trace(
+                    call_type="dataflow",
+                    threshold=threshold,
+                    top_k_per_dst=top_k_per_dst,
+                    raw_response_text="",
+                    parsed_result={},
+                    error=f"{type(exc).__name__}: {exc}",
+                    trace_sink=trace_sink,
+                )
+            try:
+                reasoning_edges = fut_reasoning.result()
+            except Exception as exc:
+                self._record_trace(
+                    call_type="reasoning",
+                    threshold=reasoning_threshold,
+                    top_k_per_dst=top_k_per_dst,
+                    raw_response_text="",
+                    parsed_result={},
+                    error=f"{type(exc).__name__}: {exc}",
+                    trace_sink=trace_sink,
+                )
+        trace_order = {"dataflow": 0, "reasoning": 1}
+        trace_sink.sort(key=lambda x: trace_order.get(str(x.get("call_type") or ""), 99))
+        self.last_traces = trace_sink
         return {"dataflow_edges": dataflow_edges, "reasoning_edges": reasoning_edges}
 

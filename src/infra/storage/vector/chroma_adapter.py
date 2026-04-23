@@ -67,6 +67,11 @@ class ChromaVectorAdapter(VectorStoreAdapter):
             return
         self.collection.upsert(ids=ids, embeddings=embeddings, metadatas=metadatas)
 
+    def delete_embeddings(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        self.collection.delete(ids=ids)
+
     def query(
         self,
         embedding: list[float],

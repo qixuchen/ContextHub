@@ -1,6 +1,6 @@
-# 16 — AMC 接入 OpenClaw Plugin / Context Engine 实施方案
+# 10 — AMC 接入 OpenClaw Plugin / Context Engine 实施方案
 
-## 16.1 目标与范围
+## 10.1 目标与范围
 
 目标：将 AMC 从“独立 commit/retrieve 服务”演进为 OpenClaw 的 **context engine plugin**，使 AMC 直接参与每轮上下文构建生命周期。
 
@@ -16,7 +16,7 @@
 
 ---
 
-## 16.2 OpenClaw 对接契约（最小实现）
+## 10.2 OpenClaw 对接契约（最小实现）
 
 AMC plugin 需要在 `register(api)` 时注册：
 
@@ -51,7 +51,7 @@ Context engine 最小必需接口：
 
 ---
 
-## 16.3 AMC 能力到生命周期映射
+## 10.3 AMC 能力到生命周期映射
 
 ### A. ingest / ingestBatch
 
@@ -111,7 +111,7 @@ Phase B（AMC 接管）：
 
 ---
 
-## 16.4 插件内部分层（建议）
+## 10.4 插件内部分层（建议）
 
 建议新增适配层，避免 OpenClaw 生命周期直接耦合现有 AMC 业务实现。
 
@@ -139,7 +139,7 @@ amc_openclaw_plugin/
 
 ---
 
-## 16.5 配置设计（最小集）
+## 10.5 配置设计（最小集）
 
 `plugins.entries.amc` 建议字段：
 - `enabled`
@@ -154,7 +154,7 @@ amc_openclaw_plugin/
 
 ---
 
-## 16.6 与现有 AMC API 的关系
+## 10.6 与现有 AMC API 的关系
 
 现有接口：
 - `POST /api/v1/amc/commit`
@@ -170,7 +170,7 @@ plugin 化后的建议：
 
 ---
 
-## 16.7 v0 最小化连通性实现（先观察插件接入是否正常）
+## 10.7 v0 最小化连通性实现（先观察插件接入是否正常）
 
 目的：在不引入 AMC 召回复杂度的前提下，先验证 OpenClaw plugin 生命周期触发、配置挂载与落盘链路。
 
@@ -221,7 +221,7 @@ plugin 化后的建议：
 
 ---
 
-## 16.8 分阶段实施计划
+## 10.8 分阶段实施计划
 
 ### Phase 1（最小可用）
 - 注册 `contextEngine=amc`
@@ -242,7 +242,7 @@ plugin 化后的建议：
 
 ---
 
-## 16.9 测试与验收
+## 10.9 测试与验收
 
 ### 单元测试
 - engine hooks 输入输出契约：
@@ -261,7 +261,7 @@ plugin 化后的建议：
 
 ---
 
-## 16.10 风险与缓解
+## 10.10 风险与缓解
 
 1. **生命周期不匹配**
    - 风险：OpenClaw 回调频率与 AMC commit 粒度不一致
@@ -281,7 +281,7 @@ plugin 化后的建议：
 
 ---
 
-## 16.11 交付清单（Done 定义）
+## 10.11 交付清单（Done 定义）
 
 - [ ] 新增 `amc` context engine plugin，能被 OpenClaw 正常加载；
 - [ ] `plugins.slots.contextEngine=amc` 时可完成 ingest/assemble/compact；
@@ -291,7 +291,7 @@ plugin 化后的建议：
 
 ---
 
-## 16.12 参考主分支 ContextHub 接入实现（仿照清单）
+## 10.12 参考主分支 ContextHub 接入实现（仿照清单）
 
 本节基于 main 分支已存在的 ContextHub -> OpenClaw 接入代码（`bridge/`）提炼 AMC 可复用模式，作为后续实现模板。
 

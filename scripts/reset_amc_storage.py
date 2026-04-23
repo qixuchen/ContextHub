@@ -130,39 +130,68 @@ def _reset_neo4j(
 def run(args: argparse.Namespace) -> dict[str, Any]:
     settings = load_settings(config_path=args.config_path)
     content_root = Path(args.content_root or settings.storage.localfs_root)
+    only_skill_embedding = bool(args.only_skill_embedding)
+    include_skill_embedding = bool(args.include_skill_embedding or only_skill_embedding)
     summary: dict[str, Any] = {
         "dry_run": bool(args.dry_run),
         "content": {},
         "pgvector": {},
+        "pgvector_skill": {},
         "neo4j": {},
     }
     errors: list[str] = []
 
-    try:
-        summary["content"] = _reset_content(content_root, dry_run=bool(args.dry_run))
-    except Exception as exc:
-        errors.append(f"content reset failed: {type(exc).__name__}: {exc}")
+    if only_skill_embedding:
+        summary["content"] = {"enabled": False, "skipped": True, "reason": "--only-skill-embedding"}
+    else:
+        try:
+            summary["content"] = _reset_content(content_root, dry_run=bool(args.dry_run))
+        except Exception as exc:
+            errors.append(f"content reset failed: {type(exc).__name__}: {exc}")
 
-    try:
-        summary["pgvector"] = _reset_pgvector(
-            dsn=settings.pgvector_dsn,
-            schema=settings.pgvector_schema,
-            table=settings.pgvector_table,
-            dry_run=bool(args.dry_run),
-        )
-    except Exception as exc:
-        errors.append(f"pgvector reset failed: {type(exc).__name__}: {exc}")
+    if only_skill_embedding:
+        summary["pgvector"] = {"enabled": False, "skipped": True, "reason": "--only-skill-embedding"}
+    else:
+        try:
+            summary["pgvector"] = _reset_pgvector(
+                dsn=settings.pgvector_dsn,
+                schema=settings.pgvector_schema,
+                table=settings.pgvector_table,
+                dry_run=bool(args.dry_run),
+            )
+        except Exception as exc:
+            errors.append(f"pgvector reset failed: {type(exc).__name__}: {exc}")
 
-    try:
-        summary["neo4j"] = _reset_neo4j(
-            uri=settings.neo4j_uri,
-            user=settings.neo4j_user,
-            password=settings.neo4j_password,
-            database=settings.neo4j_database,
-            dry_run=bool(args.dry_run),
-        )
-    except Exception as exc:
-        errors.append(f"neo4j reset failed: {type(exc).__name__}: {exc}")
+    if include_skill_embedding:
+        try:
+            summary["pgvector_skill"] = _reset_pgvector(
+                dsn=settings.pgvector_dsn,
+                schema=settings.pgvector_schema,
+                table=settings.skill_pgvector_table,
+                dry_run=bool(args.dry_run),
+            )
+        except Exception as exc:
+            errors.append(f"skill pgvector reset failed: {type(exc).__name__}: {exc}")
+    else:
+        summary["pgvector_skill"] = {
+            "enabled": False,
+            "skipped": True,
+            "reason": "default behavior keeps skill embeddings",
+        }
+
+    if only_skill_embedding:
+        summary["neo4j"] = {"enabled": False, "skipped": True, "reason": "--only-skill-embedding"}
+    else:
+        try:
+            summary["neo4j"] = _reset_neo4j(
+                uri=settings.neo4j_uri,
+                user=settings.neo4j_user,
+                password=settings.neo4j_password,
+                database=settings.neo4j_database,
+                dry_run=bool(args.dry_run),
+            )
+        except Exception as exc:
+            errors.append(f"neo4j reset failed: {type(exc).__name__}: {exc}")
 
     summary["errors"] = errors
     summary["ok"] = len(errors) == 0
@@ -176,6 +205,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config-path", default=None, help="Optional config YAML path")
     parser.add_argument("--content-root", default=None, help="Override local content root path")
+    parser.add_argument(
+        "--include-skill-embedding",
+        action="store_true",
+        help="Also clear skill embedding index table.",
+    )
+    parser.add_argument(
+        "--only-skill-embedding",
+        action="store_true",
+        help="Only clear skill embedding index table; keep content/trajectory/neo4j untouched.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Preview only; do not mutate storage")
     parser.add_argument("--yes", action="store_true", help="Confirm destructive reset")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")

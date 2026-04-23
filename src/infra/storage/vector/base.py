@@ -20,6 +20,9 @@ class VectorStoreAdapter(Protocol):
     def upsert_embeddings(self, records: list[dict[str, Any]]) -> None:
         """Insert/update vectors with metadata."""
 
+    def delete_embeddings(self, ids: list[str]) -> None:
+        """Delete vectors by ids."""
+
     def query(
         self,
         embedding: list[float],

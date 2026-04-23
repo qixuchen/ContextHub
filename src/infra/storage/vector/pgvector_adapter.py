@@ -91,6 +91,18 @@ class PgVectorAdapter(VectorStoreAdapter):
                         (rid, _to_vector_literal(emb), json.dumps(meta, ensure_ascii=False)),
                     )
 
+    def delete_embeddings(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        with connect(self.dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    SQL("DELETE FROM {}.{} WHERE id = ANY(%s)").format(
+                        Identifier(self.schema), Identifier(self.table)
+                    ),
+                    (ids,),
+                )
+
     def query(
         self,
         embedding: list[float],
@@ -107,6 +119,10 @@ class PgVectorAdapter(VectorStoreAdapter):
         if account_id:
             where_parts.append("COALESCE(metadata->>'account_id', '') = %s")
             params.append(account_id)
+        source_type = str(scalar.get("source_type") or "").strip().lower()
+        if source_type:
+            where_parts.append("LOWER(COALESCE(metadata->>'source_type', '')) = %s")
+            params.append(source_type)
         scopes_raw = scalar.get("scopes")
         scopes = [str(x).strip().lower() for x in (scopes_raw or []) if str(x).strip()]
         if scopes:

@@ -104,6 +104,7 @@ class RetrieveOrchestrator:
                 "owner_space_filter": list(command.owner_space_filter or []),
                 "top_k": command.top_k,
                 "hit_count": len(result.items),
+                "skill_hit_count": len(result.skills or []),
             },
         )
         return result

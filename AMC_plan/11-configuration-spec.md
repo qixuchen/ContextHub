@@ -1,6 +1,6 @@
-# 12 — AMC 配置规范（config.yaml + .env）
+# 11 — AMC 配置规范（config.yaml + .env）
 
-本文件承接 `10-main-code-structure.md`，定义 AMC 的配置分层与模板。
+本文件承接 `04-commit-pipeline.md`、`05-retrieve-pipeline.md` 与 `02-architecture.md`，定义 AMC 的配置分层与模板。
 
 **原则**
 
@@ -10,7 +10,7 @@
 
 ---
 
-## 12.1 配置分层
+## 11.1 配置分层
 
 | 来源 | 内容 |
 |------|------|
@@ -19,7 +19,7 @@
 
 ---
 
-## 12.2 config.yaml（MVP / 开发态，带注释）
+## 11.2 config.yaml（MVP / 开发态，带注释）
 
 说明：YAML 中 `#` 后为注释。
 
@@ -41,7 +41,7 @@ api:
   max_payload_mb: 20          # 请求体上限（轨迹 JSON 可能较大）
 
 # ---------------------------------------------------------------------------
-# 安全（与 `AMC_plan/05-multitenancy-and-access-control.md` 对齐）
+# 安全（与 `AMC_plan/07-multitenancy-and-access-control.md` 对齐）
 # ---------------------------------------------------------------------------
 security:
   acl:
@@ -121,7 +121,7 @@ retrieve:
     exclude_by_default: true  # true：默认过滤 stale_flag=true 的轨迹
 
 # ---------------------------------------------------------------------------
-# 审计（与 `AMC_plan/05-multitenancy-and-access-control.md` 中的审计要求对齐）
+# 审计（与 `AMC_plan/07-multitenancy-and-access-control.md` 中的审计要求对齐）
 # ---------------------------------------------------------------------------
 audit:
   enabled: true
@@ -164,7 +164,7 @@ health:
 
 ---
 
-## 12.3 .env（开发态，带注释）
+## 11.3 .env（开发态，带注释）
 
 ```bash
 # ---------- 运行 ----------
@@ -214,7 +214,7 @@ AMC_AUDIT_FILE=./data/audit/amc_audit.log
 
 ---
 
-## 12.4 Pydantic 配置对象（与 12.2 对齐，附字段说明）
+## 11.4 Pydantic 配置对象（与 11.2 对齐，附字段说明）
 
 ```python
 from pydantic import BaseModel, Field
@@ -260,7 +260,7 @@ class AppConfig(BaseModel):
 
 ---
 
-## 12.5 MVP 启动前必检项
+## 11.5 MVP 启动前必检项
 
 1. `storage.vector_store.backend` / `storage.graph_store.backend` 与实现一致  
 2. `AMC_NEO4J_*` 可连通  
@@ -271,7 +271,7 @@ class AppConfig(BaseModel):
 
 ---
 
-## 12.6 启动时校验建议（fail-fast）
+## 11.6 启动时校验建议（fail-fast）
 
 - Neo4j：URI 不可达则进程退出（或降级模式显式打印）  
 - 异步索引开启但缺少 Embedding 密钥：退出  

@@ -56,6 +56,9 @@ def test_run_commit_batch_default_inputs_success(monkeypatch, tmp_path: Path) ->
         _write_traj(tmp_path / f"traj_alfworld_{i:04d}.json")
 
     class FakeOrchestrator:
+        def __init__(self) -> None:
+            self.trigger_calls: list[dict[str, object]] = []
+
         def prepare_commits(self, commands, *, max_workers=1):  # noqa: ANN001
             out = []
             for idx, cmd in enumerate(commands):
@@ -70,6 +73,10 @@ def test_run_commit_batch_default_inputs_success(monkeypatch, tmp_path: Path) ->
 
         def commit_prepared(self, command, result):  # noqa: ANN001
             return result
+
+        def trigger_intertrajectory_batch(self, **kwargs):  # noqa: ANN001
+            self.trigger_calls.append(dict(kwargs))
+            return {"enabled": True, "mode": "end_of_batch", "evaluated_count": len(kwargs["trajectory_ids"])}
 
         def replay(self, trajectory_id: str):  # noqa: ARG002
             return {
@@ -118,6 +125,8 @@ def test_run_commit_batch_default_inputs_success(monkeypatch, tmp_path: Path) ->
     assert "resolved_inputs" not in result
     assert len(result["items"]) == 8
     assert all(item["extraction_success"] is True for item in result["items"])
+    assert result["intertrajectory_batch_trigger_summary"]["enabled"] is True
+    assert result["intertrajectory_batch_trigger_summary"]["evaluated_count"] == 8
     assert result["timing"]["total_seconds"] >= 0.0
 
 
@@ -131,11 +140,14 @@ def test_run_commit_batch_fail_fast_skips_remaining(monkeypatch, tmp_path: Path)
         def __init__(self) -> None:
             self.calls = 0
 
-        def commit(self, command):  # noqa: ANN001
+        def prepare_commit(self, command):  # noqa: ANN001
             self.calls += 1
             if self.calls == 1:
                 raise TrajectoryValidationError("bad trajectory")
             return _FakeResult("traj-ok")
+
+        def commit_prepared(self, command, result):  # noqa: ANN001
+            return result
 
         def replay(self, trajectory_id: str):  # noqa: ARG002
             return None

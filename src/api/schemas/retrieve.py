@@ -51,6 +51,23 @@ class RetrieveItem(BaseModel):
     clean_graph: dict[str, Any] | None = None
 
 
+class RetrieveSkillItem(BaseModel):
+    skill_name: str
+    description: str = ""
+    score: float
+    uri: str | None = None
+    path: str | None = None
+
+
+class RetrieveSkillSummary(BaseModel):
+    enabled: bool = False
+    top_k: int = 0
+    score_threshold: float = 0.0
+    hit_count: int = 0
+
+
 class RetrieveResponse(BaseModel):
     items: list[RetrieveItem] = Field(default_factory=list)
+    skills: list[RetrieveSkillItem] = Field(default_factory=list)
+    skill_retrieval_summary: RetrieveSkillSummary = Field(default_factory=RetrieveSkillSummary)
     warnings: list[str] = Field(default_factory=list)

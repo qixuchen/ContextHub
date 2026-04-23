@@ -71,6 +71,23 @@ class AppSettings(BaseModel):
     embedding_mode: str = "multimodal"  # text | multimodal
     llm_model: str = "gpt-4.1-mini"
     openai_api_key: str = ""
+    skill_root: str = "./data/skill"
+    skill_embedding_state_file: str = "./data/index/skill_embedding_state.json"
+    skill_embedding_max_workers: int = 4
+    skill_pgvector_table: str = "amc_skill_index"
+    skill_vector_collection_name: str = "amc_skill_index"
+    retrieve_skills_enabled: bool = True
+    retrieve_skills_top_k: int = 3
+    retrieve_skills_score_threshold: float = 0.2
+    intertrajectory_enabled: bool = True
+    intertrajectory_backend: str = "neo4j"
+    intertrajectory_edge_threshold: float = 0.7
+    intertrajectory_trigger_threshold: int = 8
+    intertrajectory_max_neighbors_per_commit: int = 32
+    intertrajectory_edge_rel_type: str = "INTERTRAJ_SIMILAR"
+    intertrajectory_pending_rel_type: str = "INTERTRAJ_ACTIVATED_PENDING"
+    intertrajectory_async_trigger: bool = True
+    intertrajectory_batch_trigger_mode: str = "end_of_batch"
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -103,6 +120,17 @@ def load_settings(config_path: str | None = None) -> AppSettings:
     audit_raw = raw.get("audit") or {}
     model_raw = raw.get("model_endpoints") or {}
     indexing_raw = raw.get("indexing") or {}
+    retrieve_raw = raw.get("retrieve") or {}
+    retrieve_skills_raw = (
+        (retrieve_raw.get("skills") or {}) if isinstance(retrieve_raw, dict) else {}
+    )
+    skills_raw = raw.get("skills") or {}
+    skill_embedding_raw = (
+        (skills_raw.get("embedding") or {}) if isinstance(skills_raw, dict) else {}
+    )
+    intertrajectory_raw = (
+        (skills_raw.get("intertrajectory") or {}) if isinstance(skills_raw, dict) else {}
+    )
 
     settings = AppSettings(
         app=AppSection(
@@ -222,4 +250,89 @@ def load_settings(config_path: str | None = None) -> AppSettings:
     # Unified LLM model shared across LLM-powered features.
     settings.llm_model = os.getenv("AMC_LLM_MODEL", str(model_raw.get("llm_model", settings.llm_model))).strip()
     settings.openai_api_key = os.getenv("AMC_OPENAI_API_KEY", settings.openai_api_key)
+    settings.skill_root = os.getenv(
+        "AMC_SKILLS_ROOT",
+        str(skills_raw.get("root", settings.skill_root)),
+    ).strip()
+    settings.skill_embedding_state_file = os.getenv(
+        "AMC_SKILL_EMBEDDING_STATE_FILE",
+        str(skill_embedding_raw.get("state_file", settings.skill_embedding_state_file)),
+    ).strip()
+    settings.skill_embedding_max_workers = int(
+        os.getenv(
+            "AMC_SKILL_EMBEDDING_MAX_WORKERS",
+            str(skill_embedding_raw.get("max_workers", settings.skill_embedding_max_workers)),
+        )
+    )
+    settings.skill_pgvector_table = os.getenv(
+        "AMC_SKILL_EMBEDDING_INDEX_TABLE",
+        str(skill_embedding_raw.get("index_table", settings.skill_pgvector_table)),
+    ).strip()
+    settings.skill_vector_collection_name = os.getenv(
+        "AMC_SKILL_VECTOR_COLLECTION_NAME",
+        str(skill_embedding_raw.get("collection_name", settings.skill_vector_collection_name)),
+    ).strip()
+    settings.retrieve_skills_enabled = os.getenv(
+        "AMC_RETRIEVE_SKILLS_ENABLED",
+        str(retrieve_skills_raw.get("enabled", settings.retrieve_skills_enabled)),
+    ).lower() in {"1", "true", "yes", "on"}
+    settings.retrieve_skills_top_k = int(
+        os.getenv(
+            "AMC_RETRIEVE_SKILLS_TOP_K",
+            str(retrieve_skills_raw.get("top_k", settings.retrieve_skills_top_k)),
+        )
+    )
+    settings.retrieve_skills_score_threshold = float(
+        os.getenv(
+            "AMC_RETRIEVE_SKILLS_SCORE_THRESHOLD",
+            str(retrieve_skills_raw.get("score_threshold", settings.retrieve_skills_score_threshold)),
+        )
+    )
+    settings.intertrajectory_enabled = os.getenv(
+        "AMC_INTERTRAJECTORY_ENABLED",
+        str(intertrajectory_raw.get("enabled", settings.intertrajectory_enabled)),
+    ).lower() in {"1", "true", "yes", "on"}
+    settings.intertrajectory_backend = os.getenv(
+        "AMC_INTERTRAJECTORY_BACKEND",
+        str(intertrajectory_raw.get("backend", settings.intertrajectory_backend)),
+    ).strip()
+    settings.intertrajectory_edge_threshold = float(
+        os.getenv(
+            "AMC_INTERTRAJECTORY_EDGE_THRESHOLD",
+            str(intertrajectory_raw.get("edge_threshold", settings.intertrajectory_edge_threshold)),
+        )
+    )
+    settings.intertrajectory_trigger_threshold = int(
+        os.getenv(
+            "AMC_INTERTRAJECTORY_TRIGGER_THRESHOLD",
+            str(intertrajectory_raw.get("trigger_threshold", settings.intertrajectory_trigger_threshold)),
+        )
+    )
+    settings.intertrajectory_max_neighbors_per_commit = int(
+        os.getenv(
+            "AMC_INTERTRAJECTORY_MAX_NEIGHBORS_PER_COMMIT",
+            str(
+                intertrajectory_raw.get(
+                    "max_neighbors_per_commit",
+                    settings.intertrajectory_max_neighbors_per_commit,
+                )
+            ),
+        )
+    )
+    settings.intertrajectory_edge_rel_type = os.getenv(
+        "AMC_INTERTRAJECTORY_EDGE_REL_TYPE",
+        str(intertrajectory_raw.get("edge_rel_type", settings.intertrajectory_edge_rel_type)),
+    ).strip()
+    settings.intertrajectory_pending_rel_type = os.getenv(
+        "AMC_INTERTRAJECTORY_PENDING_REL_TYPE",
+        str(intertrajectory_raw.get("pending_rel_type", settings.intertrajectory_pending_rel_type)),
+    ).strip()
+    settings.intertrajectory_async_trigger = os.getenv(
+        "AMC_INTERTRAJECTORY_ASYNC_TRIGGER",
+        str(intertrajectory_raw.get("async_trigger", settings.intertrajectory_async_trigger)),
+    ).lower() in {"1", "true", "yes", "on"}
+    settings.intertrajectory_batch_trigger_mode = os.getenv(
+        "AMC_INTERTRAJECTORY_BATCH_TRIGGER_MODE",
+        str(intertrajectory_raw.get("batch_trigger_mode", settings.intertrajectory_batch_trigger_mode)),
+    ).strip()
     return settings

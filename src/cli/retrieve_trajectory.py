@@ -12,11 +12,12 @@ from typing import Any
 from app.config import load_settings
 from app.orchestrators.retrieve_orchestrator import RetrieveOrchestrator
 from core.retrieve.semantic_recall import SemanticRecall
+from core.retrieve.skill_retriever import SkillRetriever
 from core.retrieve.service import RetrieveCommand, RetrieveService
 from infra.audit.audit_logger import JsonlAuditLogger
 from infra.storage.fs.trajectory_repo import LocalFSTrajectoryRepository
 from infra.storage.graph.factory import build_graph_store_writer
-from infra.storage.vector.factory import build_vector_store_adapter
+from infra.storage.vector.factory import build_skill_vector_store_adapter, build_vector_store_adapter
 
 
 def _load_partial_trajectory(path: Path | None) -> list[dict[str, Any]] | None:
@@ -84,10 +85,25 @@ def run_retrieve(
     audit = JsonlAuditLogger(file_path=settings.storage.audit_file_path)
     graph_store = build_graph_store_writer(settings)
     vector_store = build_vector_store_adapter(settings)
+    skill_vector_store = build_skill_vector_store_adapter(settings)
     semantic = None
     if vector_store is not None and settings.embedding_provider.lower() == "openai" and settings.openai_api_key:
         semantic = SemanticRecall(
             vector_store=vector_store,
+            embedding_model=settings.embedding_model,
+            api_key=settings.openai_api_key,
+            embedder_base_url=settings.model_endpoints.embedder_base_url or None,
+            embedding_mode=settings.embedding_mode,
+        )
+    skill_retriever = None
+    if (
+        settings.retrieve_skills_enabled
+        and skill_vector_store is not None
+        and settings.embedding_provider.lower() == "openai"
+        and settings.openai_api_key
+    ):
+        skill_retriever = SkillRetriever(
+            vector_store=skill_vector_store,
             embedding_model=settings.embedding_model,
             api_key=settings.openai_api_key,
             embedder_base_url=settings.model_endpoints.embedder_base_url or None,
@@ -101,6 +117,9 @@ def run_retrieve(
     orchestrator = RetrieveOrchestrator(
         retrieve_service=RetrieveService(
             semantic_recall=semantic,
+            skill_retriever=skill_retriever,
+            skill_top_k=settings.retrieve_skills_top_k,
+            skill_score_threshold=settings.retrieve_skills_score_threshold,
             clean_graph_loader=clean_graph_loader,
             # Retrieve query-graph extraction is currently rule-based only.
             query_dataflow_extractor=None,
@@ -120,7 +139,12 @@ def run_retrieve(
 
     repeats = max(1, int(repeat))
     latencies_ms: list[float] = []
-    last_result: dict[str, Any] = {"items": [], "warnings": []}
+    last_result: dict[str, Any] = {
+        "items": [],
+        "skills": [],
+        "skill_retrieval_summary": {},
+        "warnings": [],
+    }
     for _ in range(repeats):
         t0 = time.perf_counter()
         result = orchestrator.retrieve(
@@ -151,7 +175,12 @@ def run_retrieve(
                 out["clean_graph_stats"] = _clean_graph_stats(cg)
                 compact_items.append(out)
             items = compact_items
-        last_result = {"items": items, "warnings": result.warnings}
+        last_result = {
+            "items": items,
+            "skills": list(result.skills or []),
+            "skill_retrieval_summary": dict(result.skill_retrieval_summary or {}),
+            "warnings": result.warnings,
+        }
 
     sorted_lat = sorted(latencies_ms)
     perf = {

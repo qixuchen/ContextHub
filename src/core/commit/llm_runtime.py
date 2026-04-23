@@ -58,7 +58,7 @@ def is_retryable_llm_error(exc: Exception) -> bool:
 
 def default_retry_config() -> dict[str, float | int]:
     return {
-        "max_concurrency": int(os.getenv("AMC_LLM_MAX_CONCURRENCY", "4")),
+        "max_concurrency": int(os.getenv("AMC_LLM_MAX_CONCURRENCY", "6")),
         "max_retries": int(os.getenv("AMC_LLM_MAX_RETRIES", "5")),
         "base_backoff_seconds": float(os.getenv("AMC_LLM_BACKOFF_BASE_SECONDS", "1.0")),
         "max_backoff_seconds": float(os.getenv("AMC_LLM_BACKOFF_MAX_SECONDS", "15.0")),
@@ -76,6 +76,7 @@ def chat_completion_with_retry(
     max_retries: int | None = None,
     base_backoff_seconds: float | None = None,
     max_backoff_seconds: float | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> tuple[Any, int]:
     cfg = default_retry_config()
     concurrency = int(max_concurrency or cfg["max_concurrency"])
@@ -96,6 +97,7 @@ def chat_completion_with_retry(
                     model=model,
                     temperature=temperature,
                     messages=messages,
+                    response_format=response_format,
                 )
             return response, attempt
         except Exception as exc:
